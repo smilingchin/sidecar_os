@@ -1,0 +1,34 @@
+[project]
+name = "sidecar-os"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.12.5",
+    "python-dateutil>=2.9.0.post0",
+    "rich>=14.3.2",
+    "typer>=0.21.1",
+]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.0",
+]
+
+[project.scripts]
+sidecar = "sidecar_os.cli.sidecar:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sidecar_os"]
+

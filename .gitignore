@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python / uv
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Local python version pin (personal)
+.python-version
+
+# Sidecar private data (future)
+data/
+events.log
+state.sqlite
+.env
+*.local.*
+
+# Generated outputs
+outputs/
