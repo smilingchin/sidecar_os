@@ -1,0 +1,1 @@
+"""CLI tests for Sidecar OS."""

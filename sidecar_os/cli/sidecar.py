@@ -1,9 +1,17 @@
-import click
+import typer
+from .commands.core import add, status
 
-@click.group(help="Sidecar OS - event-sourced productivity assistant")
-def cli() -> None:
-    pass
+app = typer.Typer(help="Sidecar OS - event-sourced productivity assistant")
 
-@cli.command(help="Sanity check command.")
+@app.command()
 def hello() -> None:
-    click.echo("Sidecar OS is alive.")
+    """Sanity check command."""
+    typer.echo("Sidecar OS is alive.")
+
+# Register core commands
+app.command()(add)
+app.command()(status)
+
+# Entry point function for the CLI script
+def cli() -> None:
+    app()
