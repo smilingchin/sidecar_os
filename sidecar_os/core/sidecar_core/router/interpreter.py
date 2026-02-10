@@ -582,6 +582,14 @@ class AdvancedPatternInterpreter:
         if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', name) and len(name) <= 50:
             return True
 
+        # Mixed case: acronym + title case (e.g., "RSR Cube", "API Gateway", "DB Migration")
+        if re.match(r'^[A-Z0-9]{2,10}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', name) and len(name) <= 50:
+            return True
+
+        # Mixed case: title + acronym (e.g., "Project API", "Service DB")
+        if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+[A-Z0-9]{2,10}$', name) and len(name) <= 50:
+            return True
+
         return False
 
     def _generate_project_id(self, name: str) -> str:
