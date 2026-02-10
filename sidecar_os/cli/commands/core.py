@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.panel import Panel
 from typing import Optional, List, Dict
 
-from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
+from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
 from sidecar_os.core.sidecar_core.state import project_events_to_state
 from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
@@ -344,12 +344,53 @@ def done(query: str) -> None:
     console.print(f"  Event ID: {event_id[:8]}...", style="dim")
 
 
-def focus(project_query: str) -> None:
-    """Set focus on a project."""
+def focus(
+    project_query: Optional[str] = typer.Argument(None, help="Project name, ID, or alias to focus on"),
+    clear: bool = typer.Option(False, "--clear", "-c", help="Clear current focus")
+) -> None:
+    """Set focus on a project or clear current focus."""
     # Load events and project state
     store = EventStore()
     events = store.read_all()
     state = project_events_to_state(events)
+
+    # Handle --clear option
+    if clear:
+        if not state.current_focus_project:
+            console.print("💡 No project is currently focused", style="dim")
+            return
+
+        # Create focus cleared event
+        clear_event = ProjectFocusClearedEvent(payload={})
+        event_id = store.append(clear_event)
+
+        console.print("🔄 Project focus cleared", style="green")
+        console.print(f"  Event ID: {event_id[:8]}...", style="dim")
+        return
+
+    # Handle focus without argument - show current focus
+    if not project_query:
+        if state.current_focus_project:
+            focus_project = state.projects.get(state.current_focus_project)
+            if focus_project:
+                console.print(f"🎯 Currently focused on: {focus_project.name}", style="cyan")
+                console.print(f"  Project ID: {focus_project.project_id}", style="dim")
+                aliases_str = f"  Aliases: {', '.join(focus_project.aliases)}" if focus_project.aliases else ""
+                if aliases_str:
+                    console.print(aliases_str, style="dim")
+            else:
+                console.print("⚠️  Focus project no longer exists", style="yellow")
+        else:
+            console.print("💡 No project is currently focused", style="dim")
+
+        # Show available projects
+        if state.projects:
+            console.print("\n📂 Available projects:", style="cyan")
+            for p in state.projects.values():
+                focus_indicator = "🎯 " if p.project_id == state.current_focus_project else "   "
+                aliases_str = f" ({', '.join(p.aliases)})" if p.aliases else ""
+                console.print(f"{focus_indicator}{p.name}{aliases_str}", style="dim" if p.project_id != state.current_focus_project else "white")
+        return
 
     # Find the project
     project = None

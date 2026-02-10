@@ -9,6 +9,7 @@ from .schemas import (
     TaskScheduledEvent,
     ProjectCreatedEvent,
     ProjectFocusedEvent,
+    ProjectFocusClearedEvent,
     ClarificationRequestedEvent,
     ClarificationResolvedEvent,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "TaskScheduledEvent",
     "ProjectCreatedEvent",
     "ProjectFocusedEvent",
+    "ProjectFocusClearedEvent",
     "ClarificationRequestedEvent",
     "ClarificationResolvedEvent",
     "EventStore",

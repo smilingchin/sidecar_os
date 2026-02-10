@@ -59,6 +59,12 @@ class ProjectFocusedEvent(BaseEvent):
     event_type: Literal["project_focused"] = "project_focused"
 
 
+class ProjectFocusClearedEvent(BaseEvent):
+    """Event for clearing current project focus."""
+
+    event_type: Literal["project_focus_cleared"] = "project_focus_cleared"
+
+
 class ClarificationRequestedEvent(BaseEvent):
     """Event for requesting clarification from user."""
 
@@ -79,6 +85,7 @@ Event = (
     TaskScheduledEvent |
     ProjectCreatedEvent |
     ProjectFocusedEvent |
+    ProjectFocusClearedEvent |
     ClarificationRequestedEvent |
     ClarificationResolvedEvent
 )

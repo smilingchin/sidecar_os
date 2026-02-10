@@ -48,6 +48,8 @@ class StateProjector:
             self._apply_project_created(state, event)
         elif event.event_type == "project_focused":
             self._apply_project_focused(state, event)
+        elif event.event_type == "project_focus_cleared":
+            self._apply_project_focus_cleared(state, event)
         elif event.event_type == "clarification_requested":
             self._apply_clarification_requested(state, event)
         elif event.event_type == "clarification_resolved":
@@ -151,6 +153,10 @@ class StateProjector:
             project.focus_count += 1
             project.last_focused_at = event.timestamp
             state.current_focus_project = project_id
+
+    def _apply_project_focus_cleared(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply project_focus_cleared event."""
+        state.current_focus_project = None
 
     def _apply_clarification_requested(self, state: SidecarState, event: BaseEvent) -> None:
         """Apply clarification_requested event."""
