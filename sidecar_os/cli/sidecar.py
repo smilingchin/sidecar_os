@@ -1,5 +1,5 @@
 import typer
-from .commands.core import add, status, task, list_items, done, focus, triage, project_add, project_list, weekly, daily, project_cleanup
+from .commands.core import add, status, task, list_items, done, focus, triage, project_add, project_list, weekly, daily, project_cleanup, event_migrate
 
 app = typer.Typer(help="Sidecar OS - event-sourced productivity assistant")
 
@@ -21,6 +21,7 @@ app.command()(triage)
 app.command(name="project-add")(project_add)
 app.command(name="project-list")(project_list)
 app.command(name="project-cleanup")(project_cleanup)
+app.command(name="event-migrate")(event_migrate)
 
 # Register summary commands
 app.command()(weekly)
