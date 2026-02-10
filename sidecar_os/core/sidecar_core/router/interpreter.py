@@ -10,6 +10,7 @@ from uuid import uuid4
 from ..events.schemas import BaseEvent, ProjectCreatedEvent, TaskCreatedEvent, ClarificationRequestedEvent
 from ..state.models import SidecarState, Project
 from ..llm import LLMService, LLMConfig
+from ..projects import ProjectMatcher, ProjectMatchResult
 
 
 @dataclass
@@ -47,11 +48,11 @@ class AdvancedPatternInterpreter:
     # Task patterns with confidence scores
     TASK_PATTERNS = [
         (r"(?:need to|should|must|have to|todo:?|task:?)\s+(.+)", 0.9),
-        (r"(?:implement|build|create|add|write|develop|code|fix|debug)\s+(.+)", 0.8),
-        (r"(?:call|contact|email|text|message|reach out to)\s+(.+)", 0.85),
-        (r"(?:review|check|look at|examine|investigate)\s+(.+)", 0.75),
-        (r"(?:finish|complete|wrap up|finalize)\s+(.+)", 0.8),
-        (r"(?:test|verify|validate|confirm)\s+(.+)", 0.8),
+        (r"((?:implement|build|create|add|write|develop|code|fix|debug)\s+.+)", 0.8),
+        (r"((?:call|contact|email|text|message|reach out to)\s+.+)", 0.85),
+        (r"((?:review|check|look at|examine|investigate)\s+.+)", 0.75),
+        (r"((?:finish|complete|wrap up|finalize)\s+.+)", 0.8),
+        (r"((?:test|verify|validate|confirm)\s+.+)", 0.8),
     ]
 
     # Project patterns with confidence scores
@@ -95,6 +96,9 @@ class AdvancedPatternInterpreter:
                 print(f"Warning: Failed to initialize LLM service: {e}")
                 print("Falling back to pattern-only mode")
                 self.config.use_llm = False
+
+        # Initialize project matcher with same LLM service
+        self.project_matcher = ProjectMatcher(llm_service=self.llm_service)
 
     def interpret_text(self, text: str, current_state: SidecarState) -> InterpretationResult:
         """Hybrid interpretation using patterns first, LLM fallback for ambiguous cases.
@@ -147,9 +151,13 @@ class AdvancedPatternInterpreter:
 
         # Analyze patterns (existing logic)
         project_match = self._analyze_project_patterns(text, current_state, recent_events)
-        task_match = self._analyze_task_patterns(text)
-        promise_match = self._analyze_promise_patterns(text)
-        update_match = self._analyze_update_patterns(text)
+
+        # Extract clean text for task analysis (remove project prefix if found)
+        clean_text = self._extract_clean_text_for_tasks(text, project_match)
+
+        task_match = self._analyze_task_patterns(clean_text)
+        promise_match = self._analyze_promise_patterns(clean_text)
+        update_match = self._analyze_update_patterns(clean_text)
 
         # Build interpretation result (existing logic)
         events = []
@@ -360,6 +368,31 @@ class AdvancedPatternInterpreter:
             for alias in project.aliases:
                 self._project_cache[alias.lower()] = project.project_id
 
+    def _extract_clean_text_for_tasks(self, text: str, project_match: Optional[tuple]) -> str:
+        """Extract clean text for task analysis by removing project prefix.
+
+        Args:
+            text: Original input text
+            project_match: Result of project pattern matching
+
+        Returns:
+            Text with project prefix removed for better task extraction
+        """
+        if not project_match:
+            return text
+
+        # Try to remove project prefix patterns
+        for pattern, _ in self.PROJECT_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                # Remove the matched project prefix
+                clean_text = re.sub(pattern, '', text, flags=re.IGNORECASE).strip()
+                if clean_text:  # Make sure we didn't remove everything
+                    return clean_text
+
+        # Fallback: return original text if we couldn't clean it
+        return text
+
     def _get_recent_context(self, state: SidecarState, limit: int = 10) -> List[BaseEvent]:
         """Get recent events for context analysis."""
         # This would normally come from event store, but for now return empty list
@@ -367,7 +400,7 @@ class AdvancedPatternInterpreter:
         return []
 
     def _analyze_project_patterns(self, text: str, state: SidecarState, recent_events: List[BaseEvent]) -> Optional[tuple]:
-        """Analyze text for project patterns and context.
+        """Analyze text for project patterns using semantic matching.
 
         Returns:
             tuple: (project_id, confidence, explanation) or None
@@ -381,16 +414,50 @@ class AdvancedPatternInterpreter:
             if match:
                 project_name = match.group(1).strip()
 
-                # Boost confidence if project already exists
-                existing_project = state.find_project_by_alias(project_name)
-                if existing_project:
-                    confidence = min(base_confidence + 0.1, 1.0)
-                    if confidence > best_confidence:
-                        best_match = (existing_project.project_id, confidence, f"Matched existing project alias: {project_name}")
-                        best_confidence = confidence
-                else:
-                    # Check if this looks like a valid project name
-                    if self._is_valid_project_name(project_name):
+                # Use ProjectMatcher for semantic analysis
+                try:
+                    existing_projects = {
+                        proj.project_id: proj.name
+                        for proj in state.projects.values()
+                    }
+
+                    # Run semantic matching
+                    match_result = asyncio.run(
+                        self.project_matcher.find_best_match(project_name, existing_projects)
+                    )
+
+                    if match_result.matched_project_id:
+                        # Found semantic match with existing project
+                        confidence = min(base_confidence + 0.2, 1.0)  # Boost for semantic match
+                        if confidence > best_confidence:
+                            best_match = (
+                                match_result.matched_project_id,
+                                confidence,
+                                f"Semantic match: '{project_name}' → '{match_result.matched_project_id}' ({match_result.confidence_score:.0%})"
+                            )
+                            best_confidence = confidence
+                    else:
+                        # No match, create new project with normalized name
+                        if self._is_valid_project_name(project_name):
+                            confidence = base_confidence
+                            if confidence > best_confidence:
+                                best_match = (
+                                    match_result.canonical_id,
+                                    confidence,
+                                    f"New project: '{project_name}' → '{match_result.canonical_id}'"
+                                )
+                                best_confidence = confidence
+
+                except Exception as e:
+                    print(f"Project matching failed, falling back to basic logic: {e}")
+                    # Fallback to original logic
+                    existing_project = state.find_project_by_alias(project_name)
+                    if existing_project:
+                        confidence = min(base_confidence + 0.1, 1.0)
+                        if confidence > best_confidence:
+                            best_match = (existing_project.project_id, confidence, f"Matched existing project alias: {project_name}")
+                            best_confidence = confidence
+                    elif self._is_valid_project_name(project_name):
                         confidence = base_confidence
                         if confidence > best_confidence:
                             best_match = (self._generate_project_id(project_name), confidence, f"New project detected: {project_name}")
@@ -520,18 +587,21 @@ class AdvancedPatternInterpreter:
         return name.lower().replace(' ', '-')
 
     def _create_project_event(self, project_id: str, original_text: str) -> ProjectCreatedEvent:
-        """Create a project created event."""
+        """Create a project created event with normalized naming."""
+        # Use ProjectMatcher to get proper display name
+        canonical_id, display_name = self.project_matcher.normalize_project_name(project_id)
+
         # Extract aliases from the original text
         aliases = []
         if ':' in original_text:
             prefix = original_text.split(':', 1)[0].strip()
-            if prefix != project_id:
+            if prefix != canonical_id:
                 aliases.append(prefix)
 
         return ProjectCreatedEvent(
             payload={
-                "project_id": project_id,
-                "name": project_id.replace('-', ' ').title(),
+                "project_id": canonical_id,
+                "name": display_name,
                 "aliases": aliases,
                 "description": f"Auto-created from: {original_text}"
             }

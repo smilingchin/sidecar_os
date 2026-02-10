@@ -12,6 +12,7 @@ from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
 from sidecar_os.core.sidecar_core.llm import LLMService, get_usage_tracker
 from sidecar_os.core.sidecar_core.summaries import SummaryGenerator, SummaryStyle, SummaryPeriod
+from sidecar_os.core.sidecar_core.projects import ProjectCleanupManager
 
 console = Console()
 
@@ -847,3 +848,30 @@ def daily(style: str = typer.Option("exec", "--style", "-s", help="Summary style
     except Exception as e:
         console.print(f"❌ Summary generation failed: {str(e)}", style="red")
         console.print("💡 Check your LLM configuration", style="dim")
+
+def project_cleanup(
+    analyze_only: bool = typer.Option(True, "--analyze-only", "-a", help="Only show cleanup suggestions without making changes"),
+    confirm: bool = typer.Option(False, "--confirm", "-y", help="Skip confirmation prompts")
+) -> None:
+    """Clean up messy project data from testing phase."""
+
+    cleanup_manager = ProjectCleanupManager()
+
+    if analyze_only:
+        console.print("🔍 Analyzing project cleanup opportunities...", style="dim")
+        console.print()
+
+        summary = cleanup_manager.get_cleanup_summary()
+        console.print(summary)
+
+        if "No cleanup needed" not in summary:
+            console.print("\n💡 Use --no-analyze-only to apply these changes")
+    else:
+        # TODO: Implement actual cleanup execution
+        # For now, just show what would be done
+        console.print("🚧 Cleanup execution not yet implemented", style="yellow")
+        console.print("📊 Showing analysis for now...")
+        console.print()
+
+        summary = cleanup_manager.get_cleanup_summary()
+        console.print(summary)
