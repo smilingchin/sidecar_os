@@ -561,10 +561,13 @@ def _process_clarification_answers(
             project_patterns = [
                 r"project.+?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
                 r"([A-Z]{2,5})\s+project",
-                r"working on\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+                r"working on\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
+                r"^([A-Z]{2,10}(?:\s+[A-Z]{2,10})*)\s*$",  # Simple acronyms like "EU UVP", "UVP EU"
+                r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+project",  # "Project Name project"
+                r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*$"  # Simple project names like "Data Platform"
             ]
             for pattern in project_patterns:
-                match = re.search(pattern, answer, re.IGNORECASE)
+                match = re.search(pattern, answer.strip(), re.IGNORECASE)
                 if match:
                     project_name = match.group(1).strip()
                     if len(project_name) > 1:

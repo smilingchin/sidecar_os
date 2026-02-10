@@ -56,10 +56,10 @@ class AdvancedPatternInterpreter:
 
     # Project patterns with confidence scores
     PROJECT_PATTERNS = [
-        (r"^([A-Z0-9]{2,5}):\s*", 0.95),  # Acronyms like "LPD:", "EB1:" with optional space after colon
+        (r"^([A-Z0-9]+(?:\s+[A-Z0-9]+)*)\s*:\s*", 0.95),  # Acronyms like "LPD:", "EB1:", "UVP EU:"
         (r"(?:project|proj):?\s*([^:,\n]+)", 0.9),
         (r"(?:working on|focus on)\s+([^:,\n]+)", 0.8),
-        (r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s+", 0.7),  # "Project Name: ..."
+        (r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s*", 0.7),  # "Project Name: ..." with optional space after colon
     ]
 
     # Promise/commitment patterns
@@ -266,10 +266,14 @@ class AdvancedPatternInterpreter:
 
         # Build explanation
         explanation_parts = []
-        if pattern_result.confidence > 0.3:
+        if pattern_result.confidence > 0.1:  # Lower threshold to show more info
             explanation_parts.append(f"Pattern: {pattern_result.confidence:.0%}")
-        if llm_confidence > 0.3:
+        if llm_confidence > 0.1:  # Lower threshold to show more info
             explanation_parts.append(f"LLM: {llm_confidence:.0%}")
+
+        # Always show something in parentheses
+        if not explanation_parts:
+            explanation_parts.append("Low confidence")
 
         explanation = f"Hybrid analysis ({', '.join(explanation_parts)}) - {combined_confidence:.0%} combined confidence"
 
@@ -425,8 +429,12 @@ class AdvancedPatternInterpreter:
         if not name or len(name) < 2:
             return False
 
-        # Acronyms (2-5 uppercase letters or alphanumeric)
-        if re.match(r'^[A-Z0-9]{2,5}$', name):
+        # Single acronyms (2-10 uppercase letters or alphanumeric)
+        if re.match(r'^[A-Z0-9]{2,10}$', name):
+            return True
+
+        # Multi-word acronyms like "UVP EU", "API V2"
+        if re.match(r'^[A-Z0-9]{2,10}(?:\s+[A-Z0-9]{1,10})+$', name):
             return True
 
         # Title case names
