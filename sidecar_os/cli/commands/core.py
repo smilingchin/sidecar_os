@@ -12,7 +12,7 @@ from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
 from sidecar_os.core.sidecar_core.llm import LLMService, get_usage_tracker
 from sidecar_os.core.sidecar_core.summaries import SummaryGenerator, SummaryStyle, SummaryPeriod
-from sidecar_os.core.sidecar_core.projects import ProjectCleanupManager
+from sidecar_os.core.sidecar_core.projects import ProjectCleanupManager, EventLogMigrator
 
 console = Console()
 
@@ -209,9 +209,17 @@ def status() -> None:
         active_tasks = state.get_active_tasks()[:5]  # Limit to 5
 
         if active_tasks:
+            def format_task(task):
+                """Format task with project prefix if available."""
+                if task.project_id and task.project_id in state.projects:
+                    project_name = state.projects[task.project_id].name
+                    return f"• [{project_name}] {task.title} ({task.status})"
+                else:
+                    return f"• {task.title} ({task.status})"
+
             tasks_panel = Panel(
                 "\n".join([
-                    f"• {task.title} ({task.status})"
+                    format_task(task)
                     for task in active_tasks
                 ]) or "No active tasks",
                 title="Active Tasks",
@@ -312,9 +320,17 @@ def list_items(show_all: bool = typer.Option(False, "--all", "-a", help="Show al
 
         for task in sorted(active_tasks, key=lambda x: x.created_at, reverse=True):
             status_style = "yellow" if task.status == "in_progress" else "white"
+
+            # Format title with project prefix if available
+            if task.project_id and task.project_id in state.projects:
+                project_name = state.projects[task.project_id].name
+                formatted_title = f"[{project_name}] {task.title}"
+            else:
+                formatted_title = task.title
+
             tasks_table.add_row(
                 task.task_id,
-                task.title,
+                formatted_title,
                 f"[{status_style}]{task.status}[/{status_style}]",
                 task.priority or "normal",
                 task.created_at.strftime("%m-%d %H:%M")
@@ -875,3 +891,73 @@ def project_cleanup(
 
         summary = cleanup_manager.get_cleanup_summary()
         console.print(summary)
+
+
+def event_migrate(
+    preview: bool = typer.Option(False, "--preview-only", "-p", help="Only preview without executing"),
+    execute: bool = typer.Option(False, "--execute", "-x", help="Execute the migration (creates backup)"),
+    force: bool = typer.Option(False, "--force", help="Skip confirmation prompts")
+) -> None:
+    """Migrate event log by filtering out garbage data and keeping clean events."""
+
+    migrator = EventLogMigrator()
+
+    # Default behavior: show preview, then ask for execution
+    # --preview-only: only show preview
+    # --execute: skip preview and execute directly
+
+    if preview and not execute:
+        # Preview only mode
+        console.print("🔍 Analyzing event log migration opportunities...", style="dim")
+        console.print()
+
+        preview_text = migrator.get_migration_preview()
+        console.print(preview_text)
+        return
+
+    if not execute:
+        # Default mode: show preview + instructions
+        console.print("🔍 Analyzing event log migration opportunities...", style="dim")
+        console.print()
+
+        preview_text = migrator.get_migration_preview()
+        console.print(preview_text)
+        console.print("\n💡 Use --execute to perform the migration")
+        return
+
+    # Execute mode
+    if not force:
+        console.print("⚠️  This will modify your event log. A backup will be created.", style="yellow")
+        console.print("Are you sure you want to proceed? [y/N]: ", end="")
+
+        try:
+            import sys
+            confirmation = input().lower().strip()
+            if confirmation not in ['y', 'yes']:
+                console.print("❌ Migration cancelled", style="red")
+                return
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n❌ Migration cancelled", style="red")
+            return
+
+    console.print("🔄 Performing event log migration...", style="dim")
+
+    try:
+        result = migrator.migrate_to_clean_log(dry_run=False)
+
+        console.print("✅ Migration completed successfully!", style="green")
+        console.print()
+        console.print(f"📊 Results:")
+        console.print(f"  • Processed: {result.events_processed} events")
+        console.print(f"  • Kept: {result.events_kept} clean events")
+        console.print(f"  • Filtered: {result.events_filtered} garbage events")
+        console.print(f"  • Deleted: {len(result.projects_deleted)} projects")
+        console.print(f"  • Renamed: {len(result.projects_renamed)} projects")
+        console.print()
+        console.print(f"💾 Backup created: {result.backup_path}")
+        console.print()
+        console.print("🎉 Your event log is now clean! Try 'ss status' to see the results.")
+
+    except Exception as e:
+        console.print(f"❌ Migration failed: {str(e)}", style="red")
+        console.print("💡 Your original data is safe - no changes were made")

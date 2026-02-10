@@ -46,21 +46,24 @@ class AdvancedPatternInterpreter:
     """Advanced contextual pattern interpreter for structured input analysis with LLM integration."""
 
     # Task patterns with confidence scores
+    # Updated to preserve full context instead of over-summarizing
     TASK_PATTERNS = [
         (r"(?:need to|should|must|have to|todo:?|task:?)\s+(.+)", 0.9),
-        (r"((?:implement|build|create|add|write|develop|code|fix|debug)\s+.+)", 0.8),
-        (r"((?:call|contact|email|text|message|reach out to)\s+.+)", 0.85),
-        (r"((?:review|check|look at|examine|investigate)\s+.+)", 0.75),
+        (r"((?:implement|build|create|add|write|develop|code|fix|debug|enhance|update|improve|optimize|refactor)\s+.+)", 0.8),
+        (r"((?:call|contact|email|text|message|reach out to|respond to)\s+.+)", 0.85),
+        (r"((?:review|check|look at|examine|investigate|analyze)\s+.+)", 0.75),
         (r"((?:finish|complete|wrap up|finalize)\s+.+)", 0.8),
-        (r"((?:test|verify|validate|confirm)\s+.+)", 0.8),
+        (r"((?:test|verify|validate|confirm|run)\s+.+)", 0.8),
+        # Broader pattern to catch complete action phrases
+        (r"([a-z]+(?:\s+[a-z]+)*\s+(?:and|&)\s+[a-z]+(?:\s+[a-z]+)*.*)", 0.7),  # "enhance model and complete backtesting"
     ]
 
     # Project patterns with confidence scores
     PROJECT_PATTERNS = [
-        (r"^([A-Z0-9]+(?:\s+[A-Z0-9]+)*)\s*:\s*", 0.95),  # Acronyms like "LPD:", "EB1:", "UVP EU:"
+        (r"^([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)*)\s*:\s*", 0.95),  # Acronyms like "LPD:", "EB1:", "eb1a:", "lrp:"
         (r"(?:project|proj):?\s*([^:,\n]+)", 0.9),
         (r"(?:working on|focus on)\s+([^:,\n]+)", 0.8),
-        (r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s*", 0.7),  # "Project Name: ..." with optional space after colon
+        (r"^([A-Za-z][a-zA-Z\s]*)\s*:\s*", 0.7),  # "Project Name: ..." - flexible case
     ]
 
     # Promise/commitment patterns
