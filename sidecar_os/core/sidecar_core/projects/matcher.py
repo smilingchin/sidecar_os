@@ -199,6 +199,12 @@ Does the user's project reference match any existing project? Consider acronyms,
                 print(f"DEBUG: Empty response from LLM for project matching")
                 return None
 
+            # Strip markdown code blocks if present
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            elif content.startswith("```"):
+                content = content.replace("```", "").strip()
+
             # Parse JSON response
             import json
             try:
