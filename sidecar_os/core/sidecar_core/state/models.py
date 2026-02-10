@@ -66,6 +66,8 @@ class SystemStats(BaseModel):
     completed_tasks: int = 0
     project_count: int = 0
     pending_clarifications: int = 0
+    llm_requests_count: int = 0
+    llm_daily_cost: float = 0.0
     last_activity: Optional[datetime] = None
 
 

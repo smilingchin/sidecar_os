@@ -10,6 +10,7 @@ from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, 
 from sidecar_os.core.sidecar_core.state import project_events_to_state
 from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
+from sidecar_os.core.sidecar_core.llm import LLMService, get_usage_tracker
 
 console = Console()
 
@@ -119,6 +120,49 @@ def status() -> None:
 
     console.print(status_table)
     console.print()
+
+    # Show LLM usage statistics from persistent tracker
+    try:
+        usage_tracker = get_usage_tracker()
+        usage_summary = usage_tracker.get_usage_summary()
+
+        # Try to get LLM service config info (provider, model, limits)
+        try:
+            llm_service = LLMService()
+            llm_status = llm_service.get_status()
+            provider = llm_status['provider'].title()
+            model = llm_status['model']
+            cost_limit = llm_status['cost_limit']
+        except:
+            provider = usage_summary.get('provider', 'Unknown').title()
+            model = "claude-opus-4.6"  # Default
+            cost_limit = 10.0  # Default
+
+        # Show LLM status if there's any usage or for debugging
+        if usage_summary['daily_requests'] > 0 or usage_summary['daily_cost'] > 0:
+            llm_panel = Panel(
+                f"🧠 Provider: {provider}\n"
+                f"📞 Requests: {usage_summary['daily_requests']}\n"
+                f"💰 Daily Cost: ${usage_summary['daily_cost']:.4f} / ${cost_limit:.2f}\n"
+                f"📊 Model: {model}\n"
+                f"🎯 Tokens: {usage_summary['daily_input_tokens']} in / {usage_summary['daily_output_tokens']} out",
+                title="LLM Usage",
+                border_style="cyan"
+            )
+            console.print(llm_panel)
+        else:
+            # Show minimal status when no usage
+            llm_panel = Panel(
+                f"🧠 Provider: {provider} (Ready)\n"
+                f"📊 Model: {model}",
+                title="LLM Status",
+                border_style="dim"
+            )
+            console.print(llm_panel)
+    except Exception as e:
+        # Gracefully handle LLM service unavailable
+        console.print(f"[dim]LLM status unavailable: {str(e)}[/dim]")
+        console.print()
 
     # Show current focus and recent projects
     if state.projects:

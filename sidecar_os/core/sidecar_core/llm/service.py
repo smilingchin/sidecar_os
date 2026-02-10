@@ -17,6 +17,7 @@ from .providers.base import (
 )
 from .providers.bedrock import BedrockProvider
 from .providers.mock import MockProvider
+from .usage_tracker import get_usage_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +177,26 @@ class LLMService:
             if response.usage:
                 actual_cost = self._calculate_actual_cost(response, request.model)
                 self.daily_cost += actual_cost
+
+                # Track persistent usage statistics
+                usage_tracker = get_usage_tracker()
+                usage_tracker.track_request(
+                    cost=actual_cost,
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens,
+                    provider=self.config.provider
+                )
             else:
                 self.daily_cost += estimated_cost
+
+                # Track with estimated cost
+                usage_tracker = get_usage_tracker()
+                usage_tracker.track_request(
+                    cost=estimated_cost,
+                    input_tokens=0,
+                    output_tokens=0,
+                    provider=self.config.provider
+                )
 
             logger.info(f"LLM request completed. Total daily cost: ${self.daily_cost:.4f}")
             return response
