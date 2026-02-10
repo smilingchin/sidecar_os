@@ -168,17 +168,33 @@ class AdvancedPatternInterpreter:
                     explanations.append(f"Focused on project '{project_id}' ({confidence:.0%} confidence)")
                 max_confidence = max(max_confidence, confidence)
 
-        # Handle task creation
+        # Handle task creation - but check for context and actionability
         if task_match:
             title, confidence, explanation = task_match
-            task_event = self._create_task_event(
-                title,
-                text,
-                project_id=project_match[0] if project_match and project_match[1] > 0.6 else None
-            )
-            events.append(task_event)
-            explanations.append(f"Created task '{title}' ({confidence:.0%} confidence)")
-            max_confidence = max(max_confidence, confidence)
+
+            # Check if task needs clarification despite high pattern confidence
+            needs_task_clarification = self._task_needs_clarification(text, project_match, current_state)
+
+            if not needs_task_clarification:
+                # Task is clear and actionable - create it
+                task_event = self._create_task_event(
+                    title,
+                    text,
+                    project_id=project_match[0] if project_match and project_match[1] > 0.6 else None
+                )
+                events.append(task_event)
+                explanations.append(f"Created task '{title}' ({confidence:.0%} confidence)")
+                max_confidence = max(max_confidence, confidence)
+            else:
+                # Task pattern matched but needs clarification for context
+                max_confidence = 0.2  # Force immediate clarification
+                explanations.append(f"Task needs clarification despite {confidence:.0%} pattern match")
+
+                # Generate clarification questions directly
+                clarification_questions = self._generate_clarification_questions(text, current_state)
+                if clarification_questions:
+                    clarification_event = self._create_clarification_event(text, clarification_questions)
+                    events.append(clarification_event)
         elif project_match and project_match[1] > 0.7:
             remaining_text = self._extract_remaining_text_after_project(text)
             if remaining_text and len(remaining_text.split()) > 1:
@@ -423,6 +439,61 @@ class AdvancedPatternInterpreter:
                 update = match.group(1).strip() if match.groups() else text
                 return (update, confidence, f"Update pattern match: {pattern}")
         return None
+
+    def _task_needs_clarification(self, text: str, project_match: Optional[tuple], current_state: SidecarState) -> bool:
+        """Check if a task pattern match needs clarification for context/actionability."""
+
+        # Check for vague reference patterns using regex for flexibility
+        vague_patterns = [
+            r"\bthe\s+team\b", r"\bthe\s+meeting\b", r"\bthe\s+call\b",
+            r"\bthe\s+documents?\b", r"\bthe\s+files?\b", r"\bthe\s+thing\b",
+            r"\bthe\s+issue\b", r"\bthe\s+problem\b", r"\bthe\s+project\b",
+            r"\bthat\s+\w*\s*meeting\b", r"\bthat\s+\w*\s*call\b",
+            r"\bthat\s+\w*\s*document\b", r"\bthat\s+\w*\s*thing\b",
+            r"\bthis\s+\w*\s*meeting\b", r"\bthis\s+\w*\s*call\b",
+            r"\bthe\s+requirements?\b", r"\bthe\s+specs?\b"
+        ]
+
+        text_lower = text.lower()
+        has_vague_references = any(re.search(pattern, text_lower) for pattern in vague_patterns)
+
+        # Check if task lacks project context
+        has_no_project_context = not project_match or project_match[1] < 0.6
+
+        # Check for ambiguous pronouns
+        ambiguous_pronouns = ["they", "them", "it", "this", "that", "these", "those"]
+        has_ambiguous_pronouns = any(f" {pronoun} " in f" {text_lower} " for pronoun in ambiguous_pronouns)
+
+        # Check if task contains question words suggesting uncertainty
+        question_indicators = ["which", "what", "who", "when", "where", "how"]
+        has_question_indicators = any(word in text_lower for word in question_indicators)
+
+        # Task needs clarification if:
+        # 1. Has vague references AND no clear project context
+        # 2. Has ambiguous pronouns without project context
+        # 3. Contains question words suggesting uncertainty
+        if has_vague_references and has_no_project_context:
+            return True
+
+        if has_ambiguous_pronouns and has_no_project_context:
+            return True
+
+        if has_question_indicators:
+            return True
+
+        # Additional check: if it's a very generic task without specific details
+        generic_task_patterns = [
+            "follow up", "check on", "look into", "work on", "handle",
+            "deal with", "take care of", "review", "update", "fix"
+        ]
+
+        is_generic_task = any(pattern in text_lower for pattern in generic_task_patterns)
+        is_very_short = len(text.split()) <= 6
+
+        if is_generic_task and is_very_short and has_no_project_context:
+            return True
+
+        return False
 
     def _is_valid_project_name(self, name: str) -> bool:
         """Check if a string looks like a valid project name."""
