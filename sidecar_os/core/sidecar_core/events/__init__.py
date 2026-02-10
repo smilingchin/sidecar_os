@@ -7,6 +7,9 @@ from .schemas import (
     TaskCreatedEvent,
     TaskCompletedEvent,
     TaskScheduledEvent,
+    ProjectCreatedEvent,
+    ProjectFocusedEvent,
+    ClarificationRequestedEvent,
 )
 from .store import EventStore
 
@@ -17,5 +20,8 @@ __all__ = [
     "TaskCreatedEvent",
     "TaskCompletedEvent",
     "TaskScheduledEvent",
+    "ProjectCreatedEvent",
+    "ProjectFocusedEvent",
+    "ClarificationRequestedEvent",
     "EventStore",
 ]
