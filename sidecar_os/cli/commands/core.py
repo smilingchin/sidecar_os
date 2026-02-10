@@ -6,14 +6,14 @@ from rich.table import Table
 from rich.panel import Panel
 from typing import Optional
 
-from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent
+from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ClarificationRequestedEvent
 from sidecar_os.core.sidecar_core.state import project_events_to_state
-from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter
+from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
 
 console = Console()
 
-def add(text: str, smart: bool = typer.Option(True, "--smart/--no-smart", "-s/-n", help="Enable smart interpretation")) -> None:
-    """Add a new task or note with optional smart interpretation."""
+def add(text: str) -> None:
+    """Add a new task or note with intelligent interpretation."""
     # Strip whitespace for consistency
     trimmed_text = text.strip()
 
@@ -26,50 +26,68 @@ def add(text: str, smart: bool = typer.Option(True, "--smart/--no-smart", "-s/-n
     store = EventStore()
     inbox_event_id = store.append(inbox_event)
 
-    # Smart interpretation if enabled
+    # Always use intelligent interpretation with hybrid pattern + LLM approach
     additional_events = []
     interpretation_result = None
 
-    if smart:
-        # Load current state for context
-        events = store.read_all()
-        state = project_events_to_state(events)
+    # Load current state for context
+    events = store.read_all()
+    state = project_events_to_state(events)
 
-        # Interpret the input
-        interpreter = AdvancedPatternInterpreter()
-        interpretation_result = interpreter.interpret_text(trimmed_text, state)
+    # Interpret the input with hybrid interpreter
+    config = InterpreterConfig(
+        use_llm=True,
+        llm_confidence_threshold=0.6,
+        immediate_clarification_threshold=0.3
+    )
+    interpreter = AdvancedPatternInterpreter(config=config)
+    interpretation_result = interpreter.interpret_text(trimmed_text, state)
 
-        # Store additional events if confident enough
-        if interpretation_result.confidence > 0.7:
-            for event in interpretation_result.events:
-                # Link task events to the inbox event
-                if hasattr(event, 'payload') and 'created_from_event' in event.payload:
-                    event.payload['created_from_event'] = inbox_event_id
-                # Link clarification events to the inbox event
-                elif hasattr(event, 'payload') and 'source_event_id' in event.payload:
-                    event.payload['source_event_id'] = inbox_event_id
+    # Store additional events if confident enough (excluding clarifications)
+    if interpretation_result.confidence > 0.6:
+        for event in interpretation_result.events:
+            # Skip clarification events - they'll be handled in triage
+            if isinstance(event, ClarificationRequestedEvent):
+                continue
 
-                additional_event_id = store.append(event)
-                additional_events.append((event, additional_event_id))
+            # Link task events to the inbox event
+            if hasattr(event, 'payload') and 'created_from_event' in event.payload:
+                event.payload['created_from_event'] = inbox_event_id
+            # Link other events to the inbox event
+            elif hasattr(event, 'payload') and 'source_event_id' in event.payload:
+                event.payload['source_event_id'] = inbox_event_id
+
+            additional_event_id = store.append(event)
+            additional_events.append((event, additional_event_id))
 
     # Display confirmation with event ID
     console.print(f"✓ Added to inbox: {trimmed_text}", style="green")
     console.print(f"  Event ID: {inbox_event_id[:8]}...", style="dim")
 
-    # Show interpretation results if available
-    if interpretation_result and interpretation_result.confidence > 0.5:
-        console.print(f"🧠 {interpretation_result.explanation}", style="cyan")
+    # Show interpretation results
+    if interpretation_result:
+        # Show analysis method and confidence
+        method_icon = "🧠" if interpretation_result.used_llm else "🔍"
+        method_name = interpretation_result.analysis_method.title()
+        console.print(f"{method_icon} {method_name}: {interpretation_result.explanation}", style="cyan")
 
+        # Show generated events
         if additional_events:
             for event, event_id in additional_events:
                 event_type = type(event).__name__.replace('Event', '').replace('Created', '').replace('Focused', 'Focus')
                 console.print(f"  → Generated {event_type} ({event_id[:8]}...)", style="dim cyan")
 
-    # Show clarification questions if needed
-    if interpretation_result and interpretation_result.needs_clarification:
-        console.print("❓ Needs clarification:", style="yellow")
-        for i, question in enumerate(interpretation_result.clarification_questions, 1):
-            console.print(f"  {i}. {question}", style="dim yellow")
+        # Handle immediate clarification questions (very low confidence)
+        if interpretation_result.needs_clarification and interpretation_result.confidence < 0.3:
+            console.print("❓ Immediate clarification needed:", style="bold yellow")
+            for i, question in enumerate(interpretation_result.clarification_questions, 1):
+                console.print(f"  {i}. {question}", style="dim yellow")
+            console.print("💡 Please provide more details or use 'sidecar triage' later", style="dim")
+
+        # Handle staged clarification (medium-low confidence)
+        elif interpretation_result.needs_clarification:
+            console.print("🤔 Added to triage queue for clarification", style="yellow")
+            console.print("💡 Use 'sidecar triage' to provide additional details", style="dim")
 
 def status() -> None:
     """Show current status."""

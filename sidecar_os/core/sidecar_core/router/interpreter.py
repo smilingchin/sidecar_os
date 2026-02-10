@@ -1,6 +1,7 @@
 """Advanced pattern interpreter for contextual input analysis."""
 
 import re
+import asyncio
 from datetime import datetime, UTC
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 from ..events.schemas import BaseEvent, ProjectCreatedEvent, TaskCreatedEvent, ClarificationRequestedEvent
 from ..state.models import SidecarState, Project
+from ..llm import LLMService, LLMConfig
 
 
 @dataclass
@@ -19,14 +21,28 @@ class InterpretationResult:
     explanation: str
     needs_clarification: bool = False
     clarification_questions: List[str] = None
+    used_llm: bool = False  # Whether LLM was invoked
+    pattern_confidence: Optional[float] = None  # Original pattern confidence
+    llm_confidence: Optional[float] = None  # LLM confidence if used
+    analysis_method: str = "pattern"  # "pattern", "llm", or "hybrid"
 
     def __post_init__(self):
         if self.clarification_questions is None:
             self.clarification_questions = []
 
 
+@dataclass
+class InterpreterConfig:
+    """Configuration for the hybrid interpreter."""
+    use_llm: bool = True
+    llm_confidence_threshold: float = 0.6  # Use LLM if pattern confidence < this
+    immediate_clarification_threshold: float = 0.3  # Ask immediate questions if combined < this
+    llm_provider: str = "bedrock"
+    llm_model: str = "claude-opus-4.6"
+
+
 class AdvancedPatternInterpreter:
-    """Advanced contextual pattern interpreter for structured input analysis."""
+    """Advanced contextual pattern interpreter for structured input analysis with LLM integration."""
 
     # Task patterns with confidence scores
     TASK_PATTERNS = [
@@ -61,41 +77,81 @@ class AdvancedPatternInterpreter:
         (r"(?:\+\d+pp|\+\d+\%|\-\d+pp|\-\d+\%|improved|worse|better)", 0.8),  # Performance metrics
     ]
 
-    def __init__(self):
-        """Initialize the interpreter."""
+    def __init__(self, config: Optional[InterpreterConfig] = None):
+        """Initialize the interpreter with optional LLM integration."""
         self._project_cache: Dict[str, str] = {}  # alias -> project_id mapping
+        self.config = config or InterpreterConfig()
+
+        # Initialize LLM service if enabled
+        self.llm_service: Optional[LLMService] = None
+        if self.config.use_llm:
+            try:
+                llm_config = LLMConfig(
+                    provider=self.config.llm_provider,
+                    model=self.config.llm_model
+                )
+                self.llm_service = LLMService(config=llm_config)
+            except Exception as e:
+                print(f"Warning: Failed to initialize LLM service: {e}")
+                print("Falling back to pattern-only mode")
+                self.config.use_llm = False
 
     def interpret_text(self, text: str, current_state: SidecarState) -> InterpretationResult:
-        """Interpret input text and generate structured events.
+        """Hybrid interpretation using patterns first, LLM fallback for ambiguous cases.
 
         Args:
             text: Raw input text to interpret
             current_state: Current system state for context
 
         Returns:
-            InterpretationResult with events and confidence
+            InterpretationResult with events, confidence, and method used
         """
         text = text.strip()
         if not text:
             return InterpretationResult(
                 events=[],
                 confidence=0.0,
-                explanation="Empty input"
+                explanation="Empty input",
+                analysis_method="none"
             )
 
+        # Step 1: Always try pattern analysis first (fast path)
+        pattern_result = self._analyze_with_patterns(text, current_state)
+
+        # Step 2: If pattern confidence is high enough, use it directly
+        if pattern_result.confidence >= self.config.llm_confidence_threshold:
+            pattern_result.analysis_method = "pattern"
+            pattern_result.pattern_confidence = pattern_result.confidence
+            return pattern_result
+
+        # Step 3: Pattern confidence is low, try LLM if available
+        llm_result = None
+        if self.config.use_llm and self.llm_service:
+            try:
+                llm_result = asyncio.run(self._analyze_with_llm(text, current_state))
+            except Exception as e:
+                print(f"LLM analysis failed: {e}, falling back to patterns")
+
+        # Step 4: Merge pattern and LLM results
+        final_result = self._merge_interpretations(pattern_result, llm_result, text, current_state)
+
+        return final_result
+
+    def _analyze_with_patterns(self, text: str, current_state: SidecarState) -> InterpretationResult:
+        """Analyze text using existing pattern matching logic."""
         # Update project cache from current state
         self._update_project_cache(current_state)
 
         # Get recent context for interpretation
         recent_events = self._get_recent_context(current_state)
 
-        # Analyze patterns
+        # Analyze patterns (existing logic)
         project_match = self._analyze_project_patterns(text, current_state, recent_events)
         task_match = self._analyze_task_patterns(text)
         promise_match = self._analyze_promise_patterns(text)
         update_match = self._analyze_update_patterns(text)
 
-        # Build interpretation result
+        # Build interpretation result (existing logic)
         events = []
         explanations = []
         max_confidence = 0.0
@@ -105,11 +161,9 @@ class AdvancedPatternInterpreter:
             project_id, confidence, explanation = project_match
             if confidence > 0.7:
                 if project_id not in current_state.projects:
-                    # Create new project
                     events.append(self._create_project_event(project_id, text))
                     explanations.append(f"Created project '{project_id}' ({confidence:.0%} confidence)")
                 else:
-                    # Focus existing project
                     events.append(self._create_focus_event(project_id))
                     explanations.append(f"Focused on project '{project_id}' ({confidence:.0%} confidence)")
                 max_confidence = max(max_confidence, confidence)
@@ -126,43 +180,155 @@ class AdvancedPatternInterpreter:
             explanations.append(f"Created task '{title}' ({confidence:.0%} confidence)")
             max_confidence = max(max_confidence, confidence)
         elif project_match and project_match[1] > 0.7:
-            # If we have a clear project match but no task pattern,
-            # check if the remaining text after project indicator could be a task
             remaining_text = self._extract_remaining_text_after_project(text)
             if remaining_text and len(remaining_text.split()) > 1:
-                task_event = self._create_task_event(
-                    remaining_text,
-                    text,
-                    project_id=project_match[0]
-                )
+                task_event = self._create_task_event(remaining_text, text, project_id=project_match[0])
                 events.append(task_event)
                 explanations.append(f"Inferred task from project context ({project_match[1]:.0%} confidence)")
                 max_confidence = max(max_confidence, project_match[1])
 
-        # Check if we need clarification
-        needs_clarification = max_confidence < 0.6 and len(events) == 0
-        clarification_questions = []
-
-        if needs_clarification:
-            clarification_questions = self._generate_clarification_questions(text, current_state)
-            if clarification_questions:
-                events.append(self._create_clarification_event(text, clarification_questions))
-
         # Generate explanation
         if explanations:
             explanation = "; ".join(explanations)
-        elif needs_clarification:
-            explanation = f"Low confidence interpretation ({max_confidence:.0%}), requesting clarification"
         else:
-            explanation = f"No clear patterns detected in: '{text}'"
+            explanation = f"Pattern analysis: {max_confidence:.0%} confidence"
 
         return InterpretationResult(
             events=events,
             confidence=max_confidence,
             explanation=explanation,
-            needs_clarification=needs_clarification,
-            clarification_questions=clarification_questions
+            analysis_method="pattern"
         )
+
+    async def _analyze_with_llm(self, text: str, current_state: SidecarState) -> Dict[str, Any]:
+        """Analyze text using LLM for structured interpretation."""
+        # Build context for LLM
+        context = {
+            "current_focus_project": current_state.current_focus_project,
+            "recent_projects": [p.name for p in current_state.get_recent_projects(3)],
+            "active_tasks_count": len(current_state.get_active_tasks()),
+            "unprocessed_items": len(current_state.get_unprocessed_inbox())
+        }
+
+        # Use LLM service for interpretation
+        llm_result = await self.llm_service.interpret_text(text, context=context)
+        return llm_result
+
+    def _merge_interpretations(
+        self,
+        pattern_result: InterpretationResult,
+        llm_result: Optional[Dict[str, Any]],
+        text: str,
+        current_state: SidecarState
+    ) -> InterpretationResult:
+        """Merge pattern and LLM analysis results."""
+        if not llm_result:
+            # LLM failed, return pattern result
+            pattern_result.analysis_method = "pattern_only"
+            return self._handle_low_confidence(pattern_result, text, current_state)
+
+        # Extract LLM confidence and data
+        llm_confidence = llm_result.get("overall_confidence", 0.0)
+        llm_projects = llm_result.get("projects", [])
+        llm_tasks = llm_result.get("tasks", [])
+
+        # Combine confidences (weighted average favoring higher values)
+        combined_confidence = max(pattern_result.confidence, llm_confidence)
+
+        # Build combined events
+        events = list(pattern_result.events)  # Start with pattern events
+
+        # Add LLM-identified projects if pattern didn't find them
+        if llm_confidence > 0.7 and not any(isinstance(e, (ProjectCreatedEvent, type(self._create_focus_event("")))) for e in events):
+            for llm_project in llm_projects:
+                if llm_project.get("confidence", 0) > 0.7:
+                    project_name = llm_project.get("name", "")
+                    if project_name and not current_state.find_project_by_alias(project_name):
+                        events.append(self._create_project_event(project_name.lower().replace(" ", "-"), text))
+
+        # Add LLM-identified tasks if pattern didn't find them
+        if llm_confidence > 0.7 and not any(isinstance(e, TaskCreatedEvent) for e in events):
+            for llm_task in llm_tasks:
+                if llm_task.get("confidence", 0) > 0.7:
+                    task_title = llm_task.get("title", "")
+                    if task_title:
+                        events.append(self._create_task_event(task_title, text))
+
+        # Determine if clarification is needed
+        needs_clarification = combined_confidence < self.config.immediate_clarification_threshold
+        clarification_questions = []
+
+        if needs_clarification:
+            # Generate intelligent clarification questions using both pattern and LLM insights
+            clarification_questions = self._generate_intelligent_clarification(text, current_state, llm_result)
+            if clarification_questions:
+                events.append(self._create_clarification_event(text, clarification_questions))
+
+        # Build explanation
+        explanation_parts = []
+        if pattern_result.confidence > 0.3:
+            explanation_parts.append(f"Pattern: {pattern_result.confidence:.0%}")
+        if llm_confidence > 0.3:
+            explanation_parts.append(f"LLM: {llm_confidence:.0%}")
+
+        explanation = f"Hybrid analysis ({', '.join(explanation_parts)}) - {combined_confidence:.0%} combined confidence"
+
+        return InterpretationResult(
+            events=events,
+            confidence=combined_confidence,
+            explanation=explanation,
+            needs_clarification=needs_clarification,
+            clarification_questions=clarification_questions,
+            used_llm=True,
+            pattern_confidence=pattern_result.confidence,
+            llm_confidence=llm_confidence,
+            analysis_method="hybrid"
+        )
+
+    def _handle_low_confidence(
+        self,
+        result: InterpretationResult,
+        text: str,
+        current_state: SidecarState
+    ) -> InterpretationResult:
+        """Handle low-confidence interpretations that need clarification."""
+        if result.confidence < self.config.immediate_clarification_threshold:
+            result.needs_clarification = True
+            result.clarification_questions = self._generate_clarification_questions(text, current_state)
+            if result.clarification_questions:
+                result.events.append(self._create_clarification_event(text, result.clarification_questions))
+            result.explanation = f"Low confidence ({result.confidence:.0%}), requesting clarification"
+
+        return result
+
+    def _generate_intelligent_clarification(
+        self,
+        text: str,
+        current_state: SidecarState,
+        llm_result: Dict[str, Any]
+    ) -> List[str]:
+        """Generate smart clarification questions based on LLM analysis."""
+        questions = []
+
+        # Use LLM insights to generate better questions
+        llm_type = llm_result.get("type", "unknown")
+
+        if llm_type == "mixed" or llm_type == "unknown":
+            questions.append("Is this a task you need to do, meeting notes, or a status update?")
+
+        if len(current_state.projects) > 0:
+            projects_list = ", ".join([p.name for p in current_state.get_recent_projects(3)])
+            questions.append(f"Which project is this related to? ({projects_list} or something else?)")
+
+        if "task" in llm_type.lower() or any("task" in str(task) for task in llm_result.get("tasks", [])):
+            questions.append("What specific action needs to be taken?")
+            questions.append("Is there a deadline or priority for this?")
+
+        # Fallback to basic questions if LLM didn't provide much insight
+        if not questions:
+            questions = self._generate_clarification_questions(text, current_state)
+
+        return questions
 
     def _update_project_cache(self, state: SidecarState) -> None:
         """Update project alias cache from current state."""
