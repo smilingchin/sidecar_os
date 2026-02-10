@@ -44,6 +44,8 @@ class StateProjector:
             self._apply_task_completed(state, event)
         elif event.event_type == "task_scheduled":
             self._apply_task_scheduled(state, event)
+        elif event.event_type == "task_project_associated":
+            self._apply_task_project_associated(state, event)
         elif event.event_type == "project_created":
             self._apply_project_created(state, event)
         elif event.event_type == "project_focused":
@@ -126,6 +128,16 @@ class StateProjector:
                     pass
             elif isinstance(scheduled_for_str, datetime):
                 task.scheduled_for = scheduled_for_str
+
+    def _apply_task_project_associated(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply task_project_associated event."""
+        payload = event.payload
+        task_id = payload.get("task_id")
+        project_id = payload.get("project_id")
+
+        if task_id and project_id and task_id in state.tasks:
+            task = state.tasks[task_id]
+            task.project_id = project_id
 
     def _apply_project_created(self, state: SidecarState, event: BaseEvent) -> None:
         """Apply project_created event."""
