@@ -1,5 +1,5 @@
 import typer
-from .commands.core import add, status
+from .commands.core import add, status, task, list_items, done
 
 app = typer.Typer(help="Sidecar OS - event-sourced productivity assistant")
 
@@ -11,6 +11,9 @@ def hello() -> None:
 # Register core commands
 app.command()(add)
 app.command()(status)
+app.command()(task)
+app.command(name="list")(list_items)  # "list" is a Python builtin, so use name mapping
+app.command()(done)
 
 # Entry point function for the CLI script
 def cli() -> None:
