@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List
 
 from ..events import BaseEvent
-from .models import SidecarState, InboxItem, Task, SystemStats
+from .models import SidecarState, InboxItem, Task, Project, ClarificationRequest, SystemStats
 
 
 class StateProjector:
@@ -44,6 +44,12 @@ class StateProjector:
             self._apply_task_completed(state, event)
         elif event.event_type == "task_scheduled":
             self._apply_task_scheduled(state, event)
+        elif event.event_type == "project_created":
+            self._apply_project_created(state, event)
+        elif event.event_type == "project_focused":
+            self._apply_project_focused(state, event)
+        elif event.event_type == "clarification_requested":
+            self._apply_clarification_requested(state, event)
 
         # Update tracking
         state.last_event_processed = event.event_id
@@ -77,7 +83,8 @@ class StateProjector:
             created_at=event.timestamp,
             priority=payload.get("priority"),
             tags=payload.get("tags", []),
-            status="pending"
+            status="pending",
+            project_id=payload.get("project_id")
         )
 
         state.tasks[task.task_id] = task
@@ -116,6 +123,47 @@ class StateProjector:
             elif isinstance(scheduled_for_str, datetime):
                 task.scheduled_for = scheduled_for_str
 
+    def _apply_project_created(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply project_created event."""
+        payload = event.payload
+
+        project = Project(
+            project_id=payload.get("project_id", event.event_id),
+            name=payload.get("name", ""),
+            description=payload.get("description"),
+            aliases=payload.get("aliases", []),
+            created_at=event.timestamp,
+            focus_count=0,
+            last_focused_at=None
+        )
+
+        state.projects[project.project_id] = project
+
+    def _apply_project_focused(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply project_focused event."""
+        payload = event.payload
+        project_id = payload.get("project_id")
+
+        if project_id and project_id in state.projects:
+            project = state.projects[project_id]
+            project.focus_count += 1
+            project.last_focused_at = event.timestamp
+            state.current_focus_project = project_id
+
+    def _apply_clarification_requested(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply clarification_requested event."""
+        payload = event.payload
+
+        clarification = ClarificationRequest(
+            request_id=event.event_id,
+            source_event_id=payload.get("source_event_id", ""),
+            questions=payload.get("questions", []),
+            resolved=False,
+            created_at=event.timestamp
+        )
+
+        state.clarifications[clarification.request_id] = clarification
+
     def _update_stats(self, state: SidecarState) -> None:
         """Update derived statistics in the state.
 
@@ -128,6 +176,8 @@ class StateProjector:
         stats.total_events = state.stats.total_events
         stats.inbox_count = len(state.inbox_items)
         stats.unprocessed_inbox_count = len(state.get_unprocessed_inbox())
+        stats.project_count = len(state.projects)
+        stats.pending_clarifications = len(state.get_pending_clarifications())
 
         # Count tasks by status
         active_tasks = 0

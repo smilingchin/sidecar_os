@@ -1,7 +1,7 @@
 """Event schema definitions for Sidecar OS."""
 
 from datetime import datetime, UTC
-from typing import Any, Dict, Literal
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,5 +47,31 @@ class TaskScheduledEvent(BaseEvent):
     event_type: Literal["task_scheduled"] = "task_scheduled"
 
 
+class ProjectCreatedEvent(BaseEvent):
+    """Event for creating new projects."""
+
+    event_type: Literal["project_created"] = "project_created"
+
+
+class ProjectFocusedEvent(BaseEvent):
+    """Event for setting current project focus."""
+
+    event_type: Literal["project_focused"] = "project_focused"
+
+
+class ClarificationRequestedEvent(BaseEvent):
+    """Event for requesting clarification from user."""
+
+    event_type: Literal["clarification_requested"] = "clarification_requested"
+
+
 # Type alias for all event types
-Event = InboxCapturedEvent | TaskCreatedEvent | TaskCompletedEvent | TaskScheduledEvent
+Event = (
+    InboxCapturedEvent |
+    TaskCreatedEvent |
+    TaskCompletedEvent |
+    TaskScheduledEvent |
+    ProjectCreatedEvent |
+    ProjectFocusedEvent |
+    ClarificationRequestedEvent
+)
