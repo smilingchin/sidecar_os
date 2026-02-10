@@ -50,6 +50,8 @@ class StateProjector:
             self._apply_project_focused(state, event)
         elif event.event_type == "clarification_requested":
             self._apply_clarification_requested(state, event)
+        elif event.event_type == "clarification_resolved":
+            self._apply_clarification_resolved(state, event)
 
         # Update tracking
         state.last_event_processed = event.event_id
@@ -163,6 +165,14 @@ class StateProjector:
         )
 
         state.clarifications[clarification.request_id] = clarification
+
+    def _apply_clarification_resolved(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply clarification_resolved event."""
+        payload = event.payload
+        request_id = payload.get("clarification_id", "")
+
+        if request_id in state.clarifications:
+            state.clarifications[request_id].resolved = True
 
     def _update_stats(self, state: SidecarState) -> None:
         """Update derived statistics in the state.

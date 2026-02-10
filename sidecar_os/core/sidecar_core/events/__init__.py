@@ -10,6 +10,7 @@ from .schemas import (
     ProjectCreatedEvent,
     ProjectFocusedEvent,
     ClarificationRequestedEvent,
+    ClarificationResolvedEvent,
 )
 from .store import EventStore
 
@@ -23,5 +24,6 @@ __all__ = [
     "ProjectCreatedEvent",
     "ProjectFocusedEvent",
     "ClarificationRequestedEvent",
+    "ClarificationResolvedEvent",
     "EventStore",
 ]

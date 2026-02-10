@@ -65,6 +65,12 @@ class ClarificationRequestedEvent(BaseEvent):
     event_type: Literal["clarification_requested"] = "clarification_requested"
 
 
+class ClarificationResolvedEvent(BaseEvent):
+    """Event for resolving a clarification with user answers."""
+
+    event_type: Literal["clarification_resolved"] = "clarification_resolved"
+
+
 # Type alias for all event types
 Event = (
     InboxCapturedEvent |
@@ -73,5 +79,6 @@ Event = (
     TaskScheduledEvent |
     ProjectCreatedEvent |
     ProjectFocusedEvent |
-    ClarificationRequestedEvent
+    ClarificationRequestedEvent |
+    ClarificationResolvedEvent
 )

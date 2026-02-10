@@ -4,10 +4,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from typing import Optional
+from typing import Optional, List, Dict
 
-from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ClarificationRequestedEvent
+from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
 from sidecar_os.core.sidecar_core.state import project_events_to_state
+from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
 
 console = Console()
@@ -43,20 +44,24 @@ def add(text: str) -> None:
     interpreter = AdvancedPatternInterpreter(config=config)
     interpretation_result = interpreter.interpret_text(trimmed_text, state)
 
-    # Store additional events if confident enough (excluding clarifications)
-    if interpretation_result.confidence > 0.6:
-        for event in interpretation_result.events:
-            # Skip clarification events - they'll be handled in triage
-            if isinstance(event, ClarificationRequestedEvent):
-                continue
+    # Store events based on type and confidence
+    for event in interpretation_result.events:
+        should_store = False
 
+        # Always store clarification events regardless of confidence
+        if isinstance(event, ClarificationRequestedEvent):
+            should_store = True
+            # Link clarification to the inbox event
+            if hasattr(event, 'payload') and 'source_event_id' in event.payload:
+                event.payload['source_event_id'] = inbox_event_id
+        # Store other events only if confidence is high enough
+        elif interpretation_result.confidence > 0.6:
+            should_store = True
             # Link task events to the inbox event
             if hasattr(event, 'payload') and 'created_from_event' in event.payload:
                 event.payload['created_from_event'] = inbox_event_id
-            # Link other events to the inbox event
-            elif hasattr(event, 'payload') and 'source_event_id' in event.payload:
-                event.payload['source_event_id'] = inbox_event_id
 
+        if should_store:
             additional_event_id = store.append(event)
             additional_events.append((event, additional_event_id))
 
@@ -379,53 +384,232 @@ def focus(project_query: str) -> None:
 
 
 def triage() -> None:
-    """Review and process unhandled inbox items and clarifications."""
+    """Interactive triage to resolve clarifications and process unhandled items."""
+    import json
+    from uuid import uuid4
+
     # Load events and project state
     store = EventStore()
     events = store.read_all()
     state = project_events_to_state(events)
 
-    console.print("🔍 Triage Mode", style="bold blue")
+    console.print("🔍 Interactive Triage Mode", style="bold blue")
+    console.print("Press Ctrl+C to exit at any time", style="dim")
     console.print()
 
-    # Show pending clarifications first
+    # Handle pending clarifications first - they're highest priority
     pending_clarifications = state.get_pending_clarifications()
     if pending_clarifications:
-        console.print("❓ Pending Clarifications", style="bold yellow")
-        for clarification in pending_clarifications[:3]:
+        console.print("❓ Resolving Pending Clarifications", style="bold yellow")
+        console.print()
+
+        processed_any = False
+        for clarification in pending_clarifications:
+            processed_any = True
             source_item = state.inbox_items.get(clarification.source_event_id)
             source_text = source_item.text if source_item else "Unknown item"
 
-            console.print(f"📝 {source_text}", style="white")
-            for i, question in enumerate(clarification.questions, 1):
-                console.print(f"   {i}. {question}", style="dim")
-            console.print()
+            # Show the original item and questions
+            console.print(Panel(
+                f"Original: [white]{source_text}[/white]",
+                title="🔍 Clarification Needed",
+                border_style="yellow"
+            ))
 
-    # Show unprocessed inbox items
+            console.print("Please answer these questions:", style="cyan")
+
+            # Collect answers to all questions
+            answers = {}
+            try:
+                for i, question in enumerate(clarification.questions, 1):
+                    console.print(f"\n{i}. {question}", style="white")
+                    answer = typer.prompt("  Answer", default="", show_default=False).strip()
+                    if answer:  # Only store non-empty answers
+                        answers[f"q{i}"] = answer
+                        answers[f"question_{i}"] = question
+
+                # Process the answers to generate appropriate events
+                additional_events = _process_clarification_answers(
+                    source_text, clarification.questions, answers, state, source_item.event_id if source_item else ""
+                )
+
+                # Store all generated events
+                if additional_events:
+                    console.print("\n✨ Generated from your answers:", style="green")
+                    for event in additional_events:
+                        event_id = store.append(event)
+                        event_type = type(event).__name__.replace('Event', '').replace('Created', '').replace('Focused', 'Focus')
+                        console.print(f"  → {event_type} ({event_id[:8]}...)", style="dim green")
+
+                # Mark clarification as resolved
+                resolved_event = ClarificationResolvedEvent(
+                    payload={
+                        "clarification_id": clarification.request_id,
+                        "answers": answers,
+                        "resolved_at": clarification.created_at.isoformat()
+                    }
+                )
+                store.append(resolved_event)
+                console.print(f"✓ Clarification resolved", style="green")
+
+                # Ask if they want to continue
+                if len(pending_clarifications) > 1:
+                    console.print()
+                    continue_triage = typer.confirm("Continue with next clarification?", default=True)
+                    if not continue_triage:
+                        break
+
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n⚠️  Triage interrupted. Progress saved.", style="yellow")
+                break
+
+        if processed_any:
+            console.print("\n" + "="*50)
+
+        # Reload state after processing clarifications
+        events = store.read_all()
+        state = project_events_to_state(events)
+
+    # Show remaining unprocessed inbox items with suggestions
     unprocessed_inbox = state.get_unprocessed_inbox()
+    remaining_clarifications = state.get_pending_clarifications()
+
     if unprocessed_inbox:
-        console.print("📥 Unprocessed Inbox Items", style="bold cyan")
+        console.print("📥 Unprocessed Inbox Items (with AI suggestions)", style="bold cyan")
+        console.print("💡 Use 'sidecar task <id>' to convert items to tasks", style="dim")
+        console.print()
 
         # Use interpreter to suggest categorization
-        interpreter = AdvancedPatternInterpreter()
+        config = InterpreterConfig(
+            use_llm=True,
+            llm_confidence_threshold=0.6,
+            immediate_clarification_threshold=0.3
+        )
+        interpreter = AdvancedPatternInterpreter(config=config)
 
         for item in unprocessed_inbox[:5]:  # Show top 5
             console.print(f"📝 {item.text}", style="white")
+            console.print(f"    ID: {item.event_id[:8]}...", style="dim")
 
             # Get interpretation suggestion
             result = interpreter.interpret_text(item.text, state)
             if result.confidence > 0.5:
-                console.print(f"   💡 Suggestion: {result.explanation} ({result.confidence:.0%} confidence)", style="dim green")
+                method_icon = "🧠" if result.used_llm else "🔍"
+                console.print(f"    {method_icon} Suggestion: {result.explanation} ({result.confidence:.0%} confidence)", style="dim green")
             else:
-                console.print(f"   ❓ Unclear - {result.explanation}", style="dim yellow")
+                console.print(f"    ❓ Unclear - {result.explanation}", style="dim yellow")
             console.print()
 
     # Summary
-    if not pending_clarifications and not unprocessed_inbox:
+    if not remaining_clarifications and not unprocessed_inbox:
         console.print("✨ All caught up! No items need triage.", style="green")
     else:
-        console.print(f"📊 Triage Summary: {len(pending_clarifications)} clarifications, {len(unprocessed_inbox)} unprocessed items", style="dim")
-        console.print("💡 Use 'sidecar task <id>' to convert inbox items to tasks", style="dim")
+        summary_parts = []
+        if remaining_clarifications:
+            summary_parts.append(f"{len(remaining_clarifications)} clarifications")
+        if unprocessed_inbox:
+            summary_parts.append(f"{len(unprocessed_inbox)} unprocessed items")
+
+        console.print(f"📊 Triage Summary: {', '.join(summary_parts)}", style="dim")
+
+
+def _process_clarification_answers(
+    original_text: str,
+    questions: List[str],
+    answers: Dict[str, str],
+    state: SidecarState,
+    source_event_id: str
+) -> List:
+    """Process clarification answers and generate appropriate events."""
+    from uuid import uuid4
+    events = []
+
+    # Extract key information from answers
+    project_mentioned = None
+    task_mentioned = None
+    item_type = None
+
+    # Analyze only the actual user answers, not the questions
+    user_answers_only = []
+    for key, value in answers.items():
+        if key.startswith('q') and not key.startswith('question_'):
+            user_answers_only.append(value)
+
+    all_answer_text = " ".join(user_answers_only).lower()
+
+    # Detect item type - be more specific about task detection
+    if any(phrase in all_answer_text for phrase in ["task", "todo", "need to do", "have to do"]):
+        item_type = "task"
+    elif any(word in all_answer_text for word in ["note", "notes", "information", "reference", "meeting", "status update"]):
+        item_type = "note"
+    elif any(word in all_answer_text for word in ["project", "initiative", "work on"]):
+        item_type = "project"
+
+    # Detect project references
+    for answer in answers.values():
+        # Check against existing projects
+        for project in state.projects.values():
+            if (project.name.lower() in answer.lower() or
+                any(alias.lower() in answer.lower() for alias in project.aliases)):
+                project_mentioned = project.project_id
+                break
+
+        # Check for new project indicators
+        if not project_mentioned:
+            import re
+            # Look for project-like patterns in answers
+            project_patterns = [
+                r"project.+?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",
+                r"([A-Z]{2,5})\s+project",
+                r"working on\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            ]
+            for pattern in project_patterns:
+                match = re.search(pattern, answer, re.IGNORECASE)
+                if match:
+                    project_name = match.group(1).strip()
+                    if len(project_name) > 1:
+                        # Create new project
+                        project_id = project_name.lower().replace(' ', '-')
+                        events.append(ProjectCreatedEvent(
+                            payload={
+                                "project_id": project_id,
+                                "name": project_name,
+                                "aliases": [],
+                                "description": f"Created from clarification: {original_text}"
+                            }
+                        ))
+                        project_mentioned = project_id
+                        break
+
+    # Generate task if appropriate - only if explicitly identified as a task
+    if item_type == "task":
+        # Try to extract task title from answers or use original text
+        task_title = original_text
+
+        # Look for specific task descriptions in answers
+        for answer in answers.values():
+            if len(answer) > 10 and any(word in answer.lower() for word in ["need to", "should", "must", "have to"]):
+                task_title = answer
+                break
+
+        task_event = TaskCreatedEvent(
+            payload={
+                "task_id": str(uuid4()),
+                "title": task_title,
+                "description": f"Created from clarification. Original: {original_text}",
+                "created_from_event": source_event_id,
+                "project_id": project_mentioned
+            }
+        )
+        events.append(task_event)
+
+    # Focus on project if mentioned
+    if project_mentioned and project_mentioned in state.projects:
+        events.append(ProjectFocusedEvent(
+            payload={"project_id": project_mentioned}
+        ))
+
+    return events
 
 
 def project_add(name: str, alias: Optional[str] = typer.Option(None, "--alias", "-a", help="Project alias")) -> None:
