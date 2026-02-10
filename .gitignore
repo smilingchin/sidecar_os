@@ -21,3 +21,7 @@ state.sqlite
 
 # Generated outputs
 outputs/
+
+# Design specification documents (keep local only)
+REQUIREMENTS.md
+CLAUDE.md
