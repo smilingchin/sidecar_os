@@ -206,7 +206,7 @@ def status() -> None:
 
     # Show active tasks if any
     if state.tasks:
-        active_tasks = state.get_active_tasks()[:5]  # Limit to 5
+        active_tasks = state.get_active_tasks()[:10]  # Show more tasks
 
         if active_tasks:
             def format_task(task):
