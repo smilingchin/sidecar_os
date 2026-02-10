@@ -11,6 +11,7 @@ from sidecar_os.core.sidecar_core.state import project_events_to_state
 from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
 from sidecar_os.core.sidecar_core.llm import LLMService, get_usage_tracker
+from sidecar_os.core.sidecar_core.summaries import SummaryGenerator, SummaryStyle, SummaryPeriod
 
 console = Console()
 
@@ -778,3 +779,71 @@ def project_list() -> None:
         )
 
     console.print(projects_table)
+
+
+def weekly(style: str = typer.Option("exec", "--style", "-s", help="Summary style: exec (brief) or friendly (detailed)")) -> None:
+    """Generate weekly activity summary with LLM analysis."""
+    # Validate style
+    try:
+        summary_style = SummaryStyle(style)
+    except ValueError:
+        console.print(f"❌ Invalid style: {style}. Use 'exec' or 'friendly'", style="red")
+        return
+
+    # Generate summary
+    try:
+        console.print("🧠 Generating weekly summary...", style="dim")
+
+        generator = SummaryGenerator()
+        summary = generator.generate_summary(
+            period=SummaryPeriod.WEEKLY,
+            style=summary_style
+        )
+
+        console.print()
+        console.print(summary)
+        console.print()
+
+        # Show usage info
+        usage_tracker = get_usage_tracker()
+        usage_summary = usage_tracker.get_usage_summary()
+        if usage_summary['daily_requests'] > 0:
+            console.print(f"[dim]Generated using {usage_summary['provider']} (${usage_summary['daily_cost']:.4f})[/dim]")
+
+    except Exception as e:
+        console.print(f"❌ Summary generation failed: {str(e)}", style="red")
+        console.print("💡 Check your LLM configuration", style="dim")
+
+
+def daily(style: str = typer.Option("exec", "--style", "-s", help="Summary style: exec (brief) or friendly (detailed)")) -> None:
+    """Generate daily activity summary with LLM analysis."""
+    # Validate style
+    try:
+        summary_style = SummaryStyle(style)
+    except ValueError:
+        console.print(f"❌ Invalid style: {style}. Use 'exec' or 'friendly'", style="red")
+        return
+
+    # Generate summary
+    try:
+        console.print("🧠 Generating daily summary...", style="dim")
+
+        generator = SummaryGenerator()
+        summary = generator.generate_summary(
+            period=SummaryPeriod.DAILY,
+            style=summary_style
+        )
+
+        console.print()
+        console.print(summary)
+        console.print()
+
+        # Show usage info
+        usage_tracker = get_usage_tracker()
+        usage_summary = usage_tracker.get_usage_summary()
+        if usage_summary['daily_requests'] > 0:
+            console.print(f"[dim]Generated using {usage_summary['provider']} (${usage_summary['daily_cost']:.4f})[/dim]")
+
+    except Exception as e:
+        console.print(f"❌ Summary generation failed: {str(e)}", style="red")
+        console.print("💡 Check your LLM configuration", style="dim")
