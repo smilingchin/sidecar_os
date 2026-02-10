@@ -36,6 +36,7 @@ class TestStateModels:
         state = SidecarState()
 
         # Add inbox items with different timestamps
+        from datetime import timedelta
         now = datetime.now(UTC)
         state.inbox_items["1"] = InboxItem(
             event_id="1",
@@ -45,7 +46,7 @@ class TestStateModels:
         state.inbox_items["2"] = InboxItem(
             event_id="2",
             text="Item 2",
-            timestamp=now.replace(hour=now.hour - 1)
+            timestamp=now - timedelta(hours=1)
         )
 
         recent = state.get_recent_inbox_items(limit=1)
