@@ -53,6 +53,18 @@ class TaskDurationSetEvent(BaseEvent):
     event_type: Literal["task_duration_set"] = "task_duration_set"
 
 
+class TaskPriorityUpdatedEvent(BaseEvent):
+    """Event for updating task priority."""
+
+    event_type: Literal["task_priority_updated"] = "task_priority_updated"
+
+
+class TaskStatusUpdatedEvent(BaseEvent):
+    """Event for updating task status."""
+
+    event_type: Literal["task_status_updated"] = "task_status_updated"
+
+
 class TaskProjectAssociatedEvent(BaseEvent):
     """Event for associating an existing task with a project."""
 
@@ -96,6 +108,8 @@ Event = (
     TaskCompletedEvent |
     TaskScheduledEvent |
     TaskDurationSetEvent |
+    TaskPriorityUpdatedEvent |
+    TaskStatusUpdatedEvent |
     TaskProjectAssociatedEvent |
     ProjectCreatedEvent |
     ProjectFocusedEvent |

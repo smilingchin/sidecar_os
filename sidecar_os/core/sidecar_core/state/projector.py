@@ -46,6 +46,10 @@ class StateProjector:
             self._apply_task_scheduled(state, event)
         elif event.event_type == "task_duration_set":
             self._apply_task_duration_set(state, event)
+        elif event.event_type == "task_priority_updated":
+            self._apply_task_priority_updated(state, event)
+        elif event.event_type == "task_status_updated":
+            self._apply_task_status_updated(state, event)
         elif event.event_type == "task_project_associated":
             self._apply_task_project_associated(state, event)
         elif event.event_type == "project_created":
@@ -144,6 +148,35 @@ class StateProjector:
             except (ValueError, TypeError):
                 # Skip if invalid duration format
                 pass
+
+    def _apply_task_priority_updated(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply task_priority_updated event."""
+        payload = event.payload
+        task_id = payload.get("task_id")
+        priority = payload.get("priority")
+
+        if task_id and task_id in state.tasks and priority:
+            task = state.tasks[task_id]
+            # Validate priority level
+            valid_priorities = ["low", "normal", "high", "urgent"]
+            if priority.lower() in valid_priorities:
+                task.priority = priority.lower()
+
+    def _apply_task_status_updated(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply task_status_updated event."""
+        payload = event.payload
+        task_id = payload.get("task_id")
+        status = payload.get("status")
+
+        if task_id and task_id in state.tasks and status:
+            task = state.tasks[task_id]
+            # Validate status
+            valid_statuses = ["pending", "in_progress", "completed", "cancelled", "on_hold"]
+            if status.lower() in valid_statuses:
+                task.status = status.lower()
+                # If marking as completed, set completed_at timestamp if not already set
+                if status.lower() == "completed" and not task.completed_at:
+                    task.completed_at = event.timestamp
 
     def _apply_task_project_associated(self, state: SidecarState, event: BaseEvent) -> None:
         """Apply task_project_associated event."""

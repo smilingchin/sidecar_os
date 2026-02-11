@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.panel import Panel
 from typing import Optional, List, Dict
 
-from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, TaskScheduledEvent, TaskDurationSetEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
+from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, TaskScheduledEvent, TaskDurationSetEvent, TaskPriorityUpdatedEvent, TaskStatusUpdatedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
 from sidecar_os.core.sidecar_core.state import project_events_to_state
 from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
@@ -499,6 +499,159 @@ def done(query: str) -> None:
     console.print(f"✓ Completed task: {task.title}", style="green")
     console.print(f"  Task ID: {task.task_id}", style="dim")
     console.print(f"  Event ID: {event_id[:8]}...", style="dim")
+
+
+def update(
+    query: str,
+    priority: Optional[str] = typer.Option(None, "--priority", "-p", help="Update priority (low, normal, high, urgent)"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Update status (pending, in_progress, completed, cancelled, on_hold)"),
+    due_date: Optional[str] = typer.Option(None, "--due", "-d", help="Update due date (today, tomorrow, Friday, 2024-12-31)"),
+    duration: Optional[str] = typer.Option(None, "--duration", "--dur", help="Update duration ([30min], [2h], [1.5h])")
+) -> None:
+    """Update task properties (priority, status, due date, duration)."""
+    # Load events and project state
+    store = EventStore()
+    events = store.read_all()
+    state = project_events_to_state(events)
+
+    # Find the task by ID or title
+    task = None
+    for t in state.tasks.values():
+        if (t.task_id == query or
+            t.task_id.startswith(query) or
+            query.lower() in t.title.lower()):
+            task = t
+            break
+
+    if not task:
+        console.print(f"❌ Task not found: {query}", style="red")
+        console.print("💡 Try: sidecar list  # to see available tasks", style="dim")
+        return
+
+    # Show current task info
+    console.print(f"📋 Updating Task: [bold]{task.title}[/bold]")
+    console.print(f"   Current Priority: {task.priority or 'normal'}")
+    console.print(f"   Current Status: {task.status}")
+    console.print(f"   Current Due Date: {task.scheduled_for.strftime('%a %b %d, %Y') if task.scheduled_for else 'Not set'}")
+    console.print(f"   Current Duration: {task.duration_minutes}min" if task.duration_minutes else "   Current Duration: Not set")
+    console.print()
+
+    events_created = []
+    updates_made = []
+
+    # Update Priority
+    if priority:
+        valid_priorities = ["low", "normal", "high", "urgent"]
+        if priority.lower() not in valid_priorities:
+            console.print(f"❌ Invalid priority: {priority}. Valid options: {', '.join(valid_priorities)}", style="red")
+            return
+
+        priority_event = TaskPriorityUpdatedEvent(
+            payload={
+                "task_id": task.task_id,
+                "priority": priority.lower(),
+                "previous_priority": task.priority or "normal"
+            }
+        )
+        event_id = store.append(priority_event)
+        events_created.append(f"Priority → {priority.lower()}")
+
+    # Update Status
+    if status:
+        valid_statuses = ["pending", "in_progress", "completed", "cancelled", "on_hold"]
+        if status.lower() not in valid_statuses:
+            console.print(f"❌ Invalid status: {status}. Valid options: {', '.join(valid_statuses)}", style="red")
+            return
+
+        status_event = TaskStatusUpdatedEvent(
+            payload={
+                "task_id": task.task_id,
+                "status": status.lower(),
+                "previous_status": task.status
+            }
+        )
+        event_id = store.append(status_event)
+        events_created.append(f"Status → {status.lower()}")
+
+    # Update Due Date
+    if due_date:
+        # Parse relative dates using our existing interpreter logic
+        from sidecar_os.core.sidecar_core.router.interpreter import AdvancedPatternInterpreter
+        interpreter = AdvancedPatternInterpreter()
+
+        # Convert relative date to ISO format
+        due_date_iso = None
+        if due_date.lower() in ['today', 'tomorrow'] or due_date.lower() in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+            due_date_iso = interpreter._convert_relative_date_to_iso(due_date.lower())
+        else:
+            # Try to parse as ISO date directly
+            try:
+                from datetime import datetime
+                parsed_date = datetime.fromisoformat(due_date)
+                due_date_iso = parsed_date.isoformat()
+            except ValueError:
+                console.print(f"❌ Invalid date format: {due_date}. Use: today, tomorrow, Friday, or YYYY-MM-DD", style="red")
+                return
+
+        if due_date_iso:
+            scheduled_event = TaskScheduledEvent(
+                payload={
+                    "task_id": task.task_id,
+                    "scheduled_for": due_date_iso
+                }
+            )
+            event_id = store.append(scheduled_event)
+            events_created.append(f"Due Date → {due_date}")
+
+    # Update Duration
+    if duration:
+        # Parse duration using regex patterns
+        import re
+        duration_minutes = None
+
+        # Parse [2h], [30min], [1.5h] formats
+        if match := re.search(r'^\[?(\d+(?:\.\d+)?)\s*(?:hrs?|hours?)\]?$', duration, re.IGNORECASE):
+            duration_minutes = int(float(match.group(1)) * 60)
+        elif match := re.search(r'^\[?(\d+)\s*(?:mins?|minutes?)\]?$', duration, re.IGNORECASE):
+            duration_minutes = int(match.group(1))
+        elif match := re.search(r'^\[?(\d+(?:\.\d+)?)\s*h\]?$', duration, re.IGNORECASE):
+            duration_minutes = int(float(match.group(1)) * 60)
+        elif match := re.search(r'^\[?(\d+)\s*m\]?$', duration, re.IGNORECASE):
+            duration_minutes = int(match.group(1))
+        else:
+            console.print(f"❌ Invalid duration format: {duration}. Use: [30min], [2h], [1.5h]", style="red")
+            return
+
+        if duration_minutes and duration_minutes > 0:
+            duration_event = TaskDurationSetEvent(
+                payload={
+                    "task_id": task.task_id,
+                    "duration_minutes": duration_minutes
+                }
+            )
+            event_id = store.append(duration_event)
+
+            # Format for display
+            if duration_minutes >= 60:
+                hours = duration_minutes // 60
+                minutes = duration_minutes % 60
+                if minutes == 0:
+                    duration_display = f"{hours}h"
+                else:
+                    duration_display = f"{hours}h{minutes}m"
+            else:
+                duration_display = f"{duration_minutes}m"
+            events_created.append(f"Duration → {duration_display}")
+
+    # Display results
+    if events_created:
+        console.print("✅ Task updated successfully:", style="green")
+        for update in events_created:
+            console.print(f"   • {update}")
+        console.print(f"   Task ID: {task.task_id}", style="dim")
+    else:
+        console.print("ℹ️  No updates specified. Use --priority, --status, --due, or --duration options.", style="yellow")
+        console.print("💡 Example: sidecar update 8c5e --priority high --due tomorrow", style="dim")
 
 
 def focus(
