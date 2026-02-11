@@ -662,9 +662,216 @@ def list_items(
         console.print(f"Summary: {len(unprocessed_inbox)} inbox • {len(active_tasks)} active tasks", style="dim")
 
 
-def update() -> None:
-    """Update task properties."""
-    console.print("Update functionality - placeholder", style="dim")
+def update(
+    natural_language_request: Optional[str] = typer.Argument(None, help="Natural language update request (e.g., 'completed project X task')"),
+    task_id: Optional[str] = typer.Option(None, "--task", "-t", help="Specific task ID to update"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Update task status (pending, in_progress, completed)"),
+    priority: Optional[str] = typer.Option(None, "--priority", "-p", help="Update priority (low, normal, high, urgent)"),
+    due_date: Optional[str] = typer.Option(None, "--due", "-d", help="Update due date (e.g., 'tomorrow', '2024-12-25')"),
+    duration: Optional[str] = typer.Option(None, "--duration", help="Update duration estimate (e.g., '2h', '30min')"),
+) -> None:
+    """Update task properties using natural language or structured options."""
+
+    store = EventStore()
+    artifact_store = ArtifactStore()
+    events = store.read_all()
+    artifact_events = artifact_store.read_all_artifact_events()
+    state = project_events_to_state(events, artifact_events)
+
+    # Natural language processing
+    if natural_language_request:
+        console.print(f"🔄 Processing: {natural_language_request}", style="dim")
+
+        # Use LLM to parse the update request
+        try:
+            llm_service = LLMService()
+
+            # Simple pattern matching for common updates
+            request_lower = natural_language_request.lower()
+
+            # Look for status updates
+            target_status = None
+            if any(word in request_lower for word in ["completed", "done", "finished"]):
+                target_status = "completed"
+            elif any(word in request_lower for word in ["started", "working on", "in progress"]):
+                target_status = "in_progress"
+            elif any(word in request_lower for word in ["pending", "not started", "todo"]):
+                target_status = "pending"
+
+            # Look for priority updates
+            target_priority = None
+            if "urgent" in request_lower:
+                target_priority = "urgent"
+            elif "high priority" in request_lower or "high" in request_lower:
+                target_priority = "high"
+            elif "low priority" in request_lower or "low" in request_lower:
+                target_priority = "low"
+
+            # Find matching tasks by keywords
+            all_tasks = state.get_active_tasks() + state.get_completed_tasks()
+            matching_tasks = []
+
+            # Extract keywords from the request
+            words = request_lower.split()
+            for task in all_tasks:
+                task_text = f"{task.title} {task.description or ''}".lower()
+                # Check if any significant words from the request appear in the task
+                matches = sum(1 for word in words if len(word) > 2 and word in task_text)
+                if matches > 0:
+                    matching_tasks.append((task, matches))
+
+            # Sort by match score
+            matching_tasks.sort(key=lambda x: x[1], reverse=True)
+
+            if not matching_tasks:
+                console.print("❌ No matching tasks found", style="red")
+                console.print("Try being more specific or use --task flag with a task ID", style="dim")
+                return
+
+            # Use best match
+            target_task, match_score = matching_tasks[0]
+
+            console.print(f"🎯 Found match: {target_task.title}", style="green")
+
+            # Apply updates
+            updated_something = False
+
+            if target_status and target_task.status != target_status:
+                if target_status == "completed":
+                    event = TaskCompletedEvent(
+                        related_task_id=target_task.task_id,
+                        payload={"completion_method": "manual"}
+                    )
+                elif target_status == "in_progress":
+                    event = TaskStatusUpdatedEvent(
+                        related_task_id=target_task.task_id,
+                        payload={"old_status": target_task.status, "new_status": "in_progress"}
+                    )
+                elif target_status == "pending":
+                    event = TaskStatusUpdatedEvent(
+                        related_task_id=target_task.task_id,
+                        payload={"old_status": target_task.status, "new_status": "pending"}
+                    )
+
+                store.append(event)
+                console.print(f"✅ Status updated to: {target_status}", style="green")
+                updated_something = True
+
+            if target_priority and target_task.priority != target_priority:
+                event = TaskPriorityUpdatedEvent(
+                    related_task_id=target_task.task_id,
+                    payload={"old_priority": target_task.priority, "new_priority": target_priority}
+                )
+                store.append(event)
+                console.print(f"✅ Priority updated to: {target_priority}", style="green")
+                updated_something = True
+
+            if not updated_something:
+                console.print("ℹ️ No changes detected in the request", style="yellow")
+
+        except Exception as e:
+            console.print(f"❌ Error processing request: {e}", style="red")
+            return
+
+    # Structured updates using flags
+    elif task_id:
+        # Find the task
+        all_tasks = state.get_active_tasks() + state.get_completed_tasks()
+        target_task = None
+
+        for task in all_tasks:
+            if task.task_id == task_id or task.task_id.startswith(task_id):
+                target_task = task
+                break
+
+        if not target_task:
+            console.print(f"❌ Task not found: {task_id}", style="red")
+            return
+
+        console.print(f"🎯 Updating task: {target_task.title}", style="green")
+
+        # Apply structured updates
+        if status:
+            if status == "completed":
+                event = TaskCompletedEvent(
+                    related_task_id=target_task.task_id,
+                    payload={"completion_method": "manual"}
+                )
+            else:
+                event = TaskStatusUpdatedEvent(
+                    related_task_id=target_task.task_id,
+                    payload={"old_status": target_task.status, "new_status": status}
+                )
+            store.append(event)
+            console.print(f"✅ Status updated to: {status}", style="green")
+
+        if priority:
+            event = TaskPriorityUpdatedEvent(
+                related_task_id=target_task.task_id,
+                payload={"old_priority": target_task.priority, "new_priority": priority}
+            )
+            store.append(event)
+            console.print(f"✅ Priority updated to: {priority}", style="green")
+
+        if due_date:
+            # Parse due date - simplified for now
+            from datetime import datetime, timedelta
+
+            try:
+                if due_date.lower() == "tomorrow":
+                    target_date = datetime.now() + timedelta(days=1)
+                elif due_date.lower() == "today":
+                    target_date = datetime.now()
+                else:
+                    # Try parsing as ISO date
+                    target_date = datetime.fromisoformat(due_date)
+
+                event = TaskScheduledEvent(
+                    related_task_id=target_task.task_id,
+                    payload={"scheduled_for": target_date.isoformat()}
+                )
+                store.append(event)
+                console.print(f"✅ Due date updated to: {target_date.strftime('%Y-%m-%d')}", style="green")
+            except ValueError:
+                console.print(f"❌ Invalid date format: {due_date}", style="red")
+
+        if duration:
+            # Parse duration - simplified
+            try:
+                duration_minutes = None
+                if duration.endswith('h'):
+                    hours = float(duration[:-1])
+                    duration_minutes = int(hours * 60)
+                elif duration.endswith('min') or duration.endswith('m'):
+                    duration_minutes = int(duration.replace('min', '').replace('m', ''))
+                elif duration.isdigit():
+                    duration_minutes = int(duration)
+
+                if duration_minutes:
+                    event = TaskDurationSetEvent(
+                        related_task_id=target_task.task_id,
+                        payload={"duration_minutes": duration_minutes}
+                    )
+                    store.append(event)
+                    console.print(f"✅ Duration updated to: {duration}", style="green")
+                else:
+                    console.print(f"❌ Invalid duration format: {duration}", style="red")
+            except ValueError:
+                console.print(f"❌ Invalid duration format: {duration}", style="red")
+
+    else:
+        console.print("📝 Task Update Commands:", style="bold blue")
+        console.print()
+        console.print("Natural language updates:", style="bold")
+        console.print("  ss update \"completed the database migration task\"", style="dim")
+        console.print("  ss update \"mark the email task as high priority\"", style="dim")
+        console.print("  ss update \"started working on the API integration\"", style="dim")
+        console.print()
+        console.print("Structured updates:", style="bold")
+        console.print("  ss update --task task_123 --status completed", style="dim")
+        console.print("  ss update --task task_123 --priority urgent", style="dim")
+        console.print("  ss update --task task_123 --due tomorrow", style="dim")
+        console.print("  ss update --task task_123 --duration 2h", style="dim")
 
 
 def ask(question: str = typer.Argument(..., help="Natural language question about your tasks and projects")) -> None:
