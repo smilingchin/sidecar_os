@@ -38,6 +38,23 @@ def add(text: str) -> None:
     # Strip whitespace for consistency
     trimmed_text = text.strip()
 
+    # Check for explicit project prefix (e.g., "ProjectName: task description")
+    explicit_project_id = None
+    explicit_project_name = None
+
+    if ':' in trimmed_text and not trimmed_text.startswith('http'):  # Avoid URLs
+        parts = trimmed_text.split(':', 1)
+        if len(parts) == 2:
+            potential_project = parts[0].strip()
+            # Check if this looks like a project name (no spaces or reasonable length)
+            if len(potential_project) <= 50 and not any(char in potential_project for char in ['?', '!', '.', ';']):
+                # Clean up project name formatting
+                explicit_project_name = potential_project.replace('_', ' ').title()
+                # Update trimmed text to remove the project prefix
+                trimmed_text = parts[1].strip()
+
+                console.print(f"📂 Detected explicit project: {explicit_project_name}", style="dim cyan")
+
     # Create and store inbox captured event
     inbox_event = InboxCapturedEvent(
         payload={"text": trimmed_text, "priority": "normal"}
@@ -52,6 +69,37 @@ def add(text: str) -> None:
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
+
+    # Handle explicit project creation/linking
+    if explicit_project_name:
+        # Look for existing project (case-insensitive)
+        existing_project = None
+        for project in state.projects.values():
+            if (project.name.lower() == explicit_project_name.lower() or
+                any(alias.lower() == explicit_project_name.lower() for alias in project.aliases)):
+                existing_project = project
+                break
+
+        if existing_project:
+            explicit_project_id = existing_project.project_id
+            console.print(f"🔗 Linking to existing project: {existing_project.name}", style="dim green")
+        else:
+            # Create new project
+            project_id = explicit_project_name.lower().replace(' ', '_')
+            project_event = ProjectCreatedEvent(
+                payload={
+                    "project_id": project_id,
+                    "name": explicit_project_name,
+                    "aliases": [explicit_project_name.lower(), project_id]
+                }
+            )
+            store.append(project_event)
+            explicit_project_id = project_id
+            console.print(f"✨ Created new project: {explicit_project_name}", style="dim green")
+
+            # Reload state to include new project
+            events = store.read_all()
+            state = project_events_to_state(events, artifact_events)
 
     # Phase 7: Try mixed content parsing first
     additional_events = []
@@ -84,13 +132,14 @@ def add(text: str) -> None:
                 for i, parsed_task in enumerate(mixed_content_result.get('tasks', [])):
                     task_id = f"task_{len(state.tasks) + i + 1}"
 
-                    # Find project ID from hints
-                    project_id = None
-                    for hint in parsed_task.get('project_hints', []):
-                        project = state.find_project_by_alias(hint)
-                        if project:
-                            project_id = project.project_id
-                            break
+                    # Use explicit project if specified, otherwise find from hints
+                    project_id = explicit_project_id
+                    if not project_id:
+                        for hint in parsed_task.get('project_hints', []):
+                            project = state.find_project_by_alias(hint)
+                            if project:
+                                project_id = project.project_id
+                                break
 
                     task_event = TaskCreatedEvent(
                         payload={
@@ -106,17 +155,86 @@ def add(text: str) -> None:
                     task_event_id = store.append(task_event)
                     additional_events.append(('task', task_event, task_event_id))
 
+                    # Handle due date if parsed
+                    if parsed_task.get('due_date'):
+                        try:
+                            from datetime import datetime, UTC
+                            due_date_str = parsed_task['due_date']
+
+                            # Handle relative dates like "tomorrow", "friday", etc.
+                            if due_date_str.lower() in ['tomorrow', 'friday', 'monday', 'tuesday', 'wednesday', 'thursday', 'saturday', 'sunday']:
+                                # Use LLM temporal parsing for relative dates
+                                llm_service = LLMService()
+
+                                async def parse_due_date():
+                                    return await llm_service.parse_temporal_expressions(f"due {due_date_str}")
+
+                                import asyncio
+                                temporal_result = asyncio.run(parse_due_date())
+
+                                if temporal_result.get('due_date') and temporal_result.get('confidence', 0) > 0.6:
+                                    due_date_iso = temporal_result['due_date']
+                                    scheduled_event = TaskScheduledEvent(
+                                        payload={
+                                            'task_id': task_id,
+                                            'scheduled_for': due_date_iso,
+                                            'scheduling_method': 'llm_mixed_content'
+                                        }
+                                    )
+                                    scheduled_event_id = store.append(scheduled_event)
+                                    additional_events.append(('schedule', scheduled_event, scheduled_event_id))
+
+                            else:
+                                # Try to parse as ISO date directly
+                                try:
+                                    parsed_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+                                    scheduled_event = TaskScheduledEvent(
+                                        payload={
+                                            'task_id': task_id,
+                                            'scheduled_for': parsed_date.isoformat(),
+                                            'scheduling_method': 'llm_mixed_content'
+                                        }
+                                    )
+                                    scheduled_event_id = store.append(scheduled_event)
+                                    additional_events.append(('schedule', scheduled_event, scheduled_event_id))
+                                except ValueError:
+                                    # Failed to parse date, skip scheduling
+                                    pass
+
+                        except Exception as e:
+                            # Silently skip due date parsing errors
+                            pass
+
+                    # Handle duration if parsed
+                    if parsed_task.get('duration_minutes'):
+                        try:
+                            duration = int(parsed_task['duration_minutes'])
+                            if 0 < duration <= 24 * 60:  # Reasonable duration (max 24 hours)
+                                duration_event = TaskDurationSetEvent(
+                                    payload={
+                                        'task_id': task_id,
+                                        'duration_minutes': duration,
+                                        'estimation_method': 'llm_mixed_content'
+                                    }
+                                )
+                                duration_event_id = store.append(duration_event)
+                                additional_events.append(('duration', duration_event, duration_event_id))
+                        except (ValueError, TypeError):
+                            # Skip invalid durations
+                            pass
+
                 # Create artifacts from parsed content
                 for i, parsed_artifact in enumerate(mixed_content_result.get('artifacts', [])):
                     artifact_id = str(uuid4())
 
-                    # Find project ID from hints
-                    project_id = None
-                    for hint in parsed_artifact.get('project_hints', []):
-                        project = state.find_project_by_alias(hint)
-                        if project:
-                            project_id = project.project_id
-                            break
+                    # Use explicit project if specified, otherwise find from hints
+                    project_id = explicit_project_id
+                    if not project_id:
+                        for hint in parsed_artifact.get('project_hints', []):
+                            project = state.find_project_by_alias(hint)
+                            if project:
+                                project_id = project.project_id
+                                break
 
                     # Auto-generate source if not provided
                     source = parsed_artifact.get('source')
@@ -187,6 +305,12 @@ def add(text: str) -> None:
                 if hasattr(event, 'payload') and 'created_from_event' in event.payload:
                     event.payload['created_from_event'] = inbox_event_id
 
+                # Use explicit project if specified and this is a task creation event
+                if isinstance(event, TaskCreatedEvent) and explicit_project_id:
+                    if hasattr(event, 'payload') and 'project_id' in event.payload:
+                        event.payload['project_id'] = explicit_project_id
+                        console.print(f"🔗 Task linked to project: {explicit_project_name}", style="dim green")
+
             if should_store:
                 additional_event_id = store.append(event)
                 additional_events.append(('legacy', event, additional_event_id))
@@ -204,9 +328,17 @@ def add(text: str) -> None:
         # Count what was created
         task_count = len([e for e in additional_events if e[0] == 'task'])
         artifact_count = len([e for e in additional_events if e[0] == 'artifact'])
+        schedule_count = len([e for e in additional_events if e[0] == 'schedule'])
+        duration_count = len([e for e in additional_events if e[0] == 'duration'])
 
         if task_count > 0:
             console.print(f"  📋 Created {task_count} task{'s' if task_count > 1 else ''}", style="green")
+
+        if schedule_count > 0:
+            console.print(f"  📅 Set {schedule_count} due date{'s' if schedule_count > 1 else ''}", style="cyan")
+
+        if duration_count > 0:
+            console.print(f"  ⏱️  Set {duration_count} duration estimate{'s' if duration_count > 1 else ''}", style="magenta")
 
         if artifact_count > 0:
             console.print(f"  📎 Created {artifact_count} artifact{'s' if artifact_count > 1 else ''}", style="magenta")
@@ -694,17 +826,18 @@ def update(
     if natural_language_request:
         console.print(f"🔄 Processing: {natural_language_request}", style="dim")
 
-        # Check if this looks like mixed content (task update + artifact)
-        mixed_content_indicators = [
-            "slack", "email", "message", "sent", "response", "here is", "below is",
-            "attached", "document", "link", "url", "meeting notes", "call notes"
-        ]
-
-        request_lower = natural_language_request.lower()
-        is_mixed_content = any(indicator in request_lower for indicator in mixed_content_indicators)
-
+        # Always use LLM for natural language processing - much more flexible than pattern matching
         try:
             llm_service = LLMService()
+
+            # Check if this looks like mixed content (task update + artifact)
+            mixed_content_indicators = [
+                "slack", "email", "message", "sent", "response", "here is", "below is",
+                "attached", "document", "link", "url", "meeting notes", "call notes"
+            ]
+
+            request_lower = natural_language_request.lower()
+            is_mixed_content = any(indicator in request_lower for indicator in mixed_content_indicators)
 
             # Use Phase 7 mixed content parsing for complex input
             if is_mixed_content and len(natural_language_request) > 100:
@@ -846,129 +979,119 @@ def update(
                         console.print("💡 Use 'ss update --task <task_id> --status completed' for precise updates", style="cyan")
                         return
 
-            # Simple pattern matching for common updates (fallback)
+            # Use LLM-powered task update parsing for flexibility with typos and variations
+            console.print("🧠 Processing with intelligent natural language parsing...", style="dim cyan")
 
-            # Look for status updates
-            target_status = None
-            if any(word in request_lower for word in ["completed", "done", "finished"]):
-                target_status = "completed"
-            elif any(word in request_lower for word in ["started", "working on", "in progress"]):
-                target_status = "in_progress"
-            elif any(word in request_lower for word in ["pending", "not started", "todo"]):
-                target_status = "pending"
+            # Prepare task context for LLM
+            available_tasks = []
+            for task in state.get_active_tasks() + state.get_completed_tasks():
+                # Get actual project name from project_id
+                project_name = None
+                if task.project_id and task.project_id in state.projects:
+                    project_name = state.projects[task.project_id].name
 
-            # Look for priority updates
-            target_priority = None
-            if "urgent" in request_lower:
-                target_priority = "urgent"
-            elif "high priority" in request_lower or "high" in request_lower:
-                target_priority = "high"
-            elif "low priority" in request_lower or "low" in request_lower:
-                target_priority = "low"
+                available_tasks.append({
+                    "task_id": task.task_id,
+                    "task_id_short": task.task_id[:8],
+                    "title": task.title,
+                    "project_id": task.project_id,
+                    "project_name": project_name,
+                    "priority": task.priority,
+                    "status": task.status,
+                    "scheduled_for": task.scheduled_for.isoformat() if task.scheduled_for else "",
+                    "duration_minutes": task.duration_minutes
+                })
 
-            # Find matching tasks by keywords
-            all_tasks = state.get_active_tasks() + state.get_completed_tasks()
-            matching_tasks = []
+            # Parse the update request using LLM
+            def run_async_task_update():
+                import asyncio
+                return asyncio.run(llm_service.parse_task_update_request(
+                    natural_language_request, available_tasks
+                ))
 
-            # Extract keywords from the request
-            words = request_lower.split()
-            significant_words = [w for w in words if len(w) > 2 and w not in ['the', 'and', 'for', 'with', 'this', 'that', 'from', 'have', 'been', 'will', 'can', 'should']]
+            parsed_update = run_async_task_update()
 
-            if len(significant_words) > 0:
-                console.print(f"🔍 Searching with keywords: {', '.join(significant_words[:5])}", style="dim")
+            confidence = parsed_update.get('confidence', 0)
+            if confidence > 0.6:  # Use LLM results for reasonable confidence
+                task_matches = parsed_update.get('task_matches', [])
+                updates = parsed_update.get('updates', {})
 
-            for task in all_tasks:
-                task_text = f"{task.title} {task.description or ''} {task.project_id or ''}".lower()
-                # Check if any significant words from the request appear in the task
-                matches = sum(1 for word in significant_words if word in task_text)
-                if matches > 0:
-                    matching_tasks.append((task, matches))
+                if task_matches:
+                    # Use the best match
+                    best_match = task_matches[0]
+                    target_task_id = best_match['task_id']
+                    match_reason = best_match.get('match_reason', 'keyword match')
 
-            # Sort by match score
-            matching_tasks.sort(key=lambda x: x[1], reverse=True)
+                    # Find the actual task object
+                    target_task = None
+                    for task in state.get_active_tasks() + state.get_completed_tasks():
+                        if task.task_id == target_task_id:
+                            target_task = task
+                            break
 
-            if not matching_tasks:
-                console.print("❌ No matching tasks found in simple keyword search", style="red")
-                console.print("💡 Tips:", style="dim")
-                console.print("   • Use --task <task_id> for precise updates", style="dim")
-                console.print("   • Check 'ss list' to see available tasks", style="dim")
-                console.print("   • Try shorter, more specific keywords", style="dim")
-                return
+                    if target_task:
+                        console.print(f"🎯 Matched task: {target_task.title} ({confidence:.0%} confidence)", style="green")
+                        console.print(f"   Reason: {match_reason}", style="dim")
 
-            # Use best match with confidence check
-            target_task, match_score = matching_tasks[0]
+                        # Apply updates
+                        updated_something = False
 
-            # Calculate simple confidence based on match score and task text similarity
-            total_words = len([w for w in words if len(w) > 2])
-            match_confidence = min(1.0, match_score / max(1, total_words * 0.3))
+                        # Status updates
+                        if updates.get('status') and target_task.status != updates['status']:
+                            new_status = updates['status']
+                            if new_status == "completed":
+                                event = TaskCompletedEvent(
+                                    payload={
+                                        "task_id": target_task.task_id,
+                                        "completion_method": "llm_natural_language"
+                                    }
+                                )
+                            else:
+                                event = TaskStatusUpdatedEvent(
+                                    payload={
+                                        "task_id": target_task.task_id,
+                                        "old_status": target_task.status,
+                                        "new_status": new_status
+                                    }
+                                )
 
-            console.print(f"🎯 Best match: {target_task.title} (confidence: {match_confidence:.0%})", style="green" if match_confidence > 0.6 else "yellow")
+                            store.append(event)
+                            console.print(f"✅ Task {target_task.task_id[:8]}... status updated to: {new_status}", style="green")
+                            console.print(f"   Method: LLM natural language processing", style="dim")
+                            updated_something = True
 
-            # Require confirmation for low-confidence matches
-            if match_confidence < 0.4:
-                console.print("⚠️ Low confidence match detected", style="yellow")
-                confirmed = typer.confirm(f"Apply updates to task '{target_task.title[:50]}...'?", default=False)
-                if not confirmed:
-                    console.print("Update cancelled. Use --task flag for precise targeting.", style="dim")
-                    return
-            elif match_confidence < 0.7:
-                # Show top 3 matches for medium confidence
-                console.print("Other possible matches:", style="dim")
-                for i, (task, score) in enumerate(matching_tasks[1:4]):
-                    console.print(f"  {i+2}. {task.title[:40]}... (score: {score})", style="dim")
+                        # Priority updates
+                        if updates.get('priority') and target_task.priority != updates['priority']:
+                            event = TaskPriorityUpdatedEvent(
+                                payload={
+                                    "task_id": target_task.task_id,
+                                    "old_priority": target_task.priority,
+                                    "new_priority": updates['priority']
+                                }
+                            )
+                            store.append(event)
+                            console.print(f"✅ Priority updated to: {updates['priority']}", style="green")
+                            updated_something = True
 
-                confirmed = typer.confirm(f"Apply updates to task '{target_task.title[:50]}...'?", default=True)
-                if not confirmed:
-                    console.print("Update cancelled. Use --task flag for precise targeting.", style="dim")
-                    return
+                        # Due date updates (if supported)
+                        if updates.get('due_date'):
+                            # Could add due date update events here
+                            console.print(f"📅 Due date update detected: {updates['due_date']}", style="cyan")
+                            console.print("   (Due date updates not yet implemented)", style="dim")
 
-            # Apply updates
-            updated_something = False
-
-            if target_status and target_task.status != target_status:
-                if target_status == "completed":
-                    event = TaskCompletedEvent(
-                        payload={
-                            "task_id": target_task.task_id,
-                            "completion_method": "manual"
-                        }
-                    )
-                elif target_status == "in_progress":
-                    event = TaskStatusUpdatedEvent(
-                        payload={
-                            "task_id": target_task.task_id,
-                            "old_status": target_task.status,
-                            "new_status": "in_progress"
-                        }
-                    )
-                elif target_status == "pending":
-                    event = TaskStatusUpdatedEvent(
-                        payload={
-                            "task_id": target_task.task_id,
-                            "old_status": target_task.status,
-                            "new_status": "pending"
-                        }
-                    )
-
-                store.append(event)
-                console.print(f"✅ Task {target_task.task_id[:8]}... status updated to: {target_status}", style="green")
-                console.print(f"   Method: Simple keyword matching", style="dim")
-                updated_something = True
-
-            if target_priority and target_task.priority != target_priority:
-                event = TaskPriorityUpdatedEvent(
-                    payload={
-                        "task_id": target_task.task_id,
-                        "old_priority": target_task.priority,
-                        "new_priority": target_priority
-                    }
-                )
-                store.append(event)
-                console.print(f"✅ Priority updated to: {target_priority}", style="green")
-                updated_something = True
-
-            if not updated_something:
-                console.print("ℹ️ No changes detected in the request", style="yellow")
+                        if not updated_something:
+                            console.print("ℹ️ No changes detected in the request", style="dim yellow")
+                            console.print(f"   Parsed updates: {updates}", style="dim")
+                    else:
+                        console.print("⚠️ Matched task ID not found in current state", style="yellow")
+                else:
+                    console.print("❌ No matching tasks found", style="red")
+                    console.print(f"   LLM explanation: {parsed_update.get('explanation', 'No explanation provided')}", style="dim")
+                    console.print("💡 Try being more specific or use --task flag", style="dim")
+            else:
+                console.print(f"⚠️ Low confidence in parsing ({confidence:.0%})", style="yellow")
+                console.print(f"   Error: {parsed_update.get('error', 'Unknown parsing error')}", style="dim red")
+                console.print("💡 Try simpler language or use --task flag for precise updates", style="dim")
 
         except Exception as e:
             console.print(f"❌ Error processing request: {e}", style="red")
@@ -1354,10 +1477,16 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
             # Prepare context for the LLM
             available_tasks = []
             for task in state.get_active_tasks() + state.get_completed_tasks():
+                # Get actual project name from project_id
+                project_name = None
+                if task.project_id and task.project_id in state.projects:
+                    project_name = state.projects[task.project_id].name
+
                 available_tasks.append({
                     "task_id": task.task_id,
                     "title": task.title,
-                    "project_name": task.project_id,
+                    "project_id": task.project_id,
+                    "project_name": project_name,
                     "priority": task.priority,
                     "status": task.status,
                     "created_at": task.created_at.isoformat() if task.created_at else "",
@@ -1395,10 +1524,12 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
                 if filters.get('status'):
                     matching_tasks = [t for t in matching_tasks if t['status'] == filters['status']]
 
-                # Filter by project
+                # Filter by project (check both project_name and project_id)
                 if filters.get('project_name'):
                     proj_name_lower = filters['project_name'].lower()
-                    matching_tasks = [t for t in matching_tasks if t['project_name'] and proj_name_lower in t['project_name'].lower()]
+                    matching_tasks = [t for t in matching_tasks
+                                    if (t['project_name'] and proj_name_lower in t['project_name'].lower()) or
+                                       (t['project_id'] and proj_name_lower in t['project_id'].lower())]
 
                 # Filter by keywords
                 if filters.get('keywords'):
