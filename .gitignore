@@ -28,3 +28,4 @@ CLAUDE.md
 
 # Session checkpoints and summaries (keep local only)
 claude-checkpoint/
+outputs/

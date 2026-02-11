@@ -1529,9 +1529,290 @@ def triage() -> None:
     console.print("Triage functionality - placeholder", style="dim")
 
 
-def weekly() -> None:
-    """Generate weekly summary."""
-    console.print("Weekly summary functionality - placeholder", style="dim")
+def weekly(
+    style: str = typer.Option("executive", "--style", "-s", help="Summary style: executive, detailed, narrative"),
+    days: int = typer.Option(7, "--days", "-d", help="Number of days to include (default: 7)"),
+    output: bool = typer.Option(False, "--output", "-o", help="Save summary to file")
+) -> None:
+    """Generate comprehensive weekly summary with AI analysis."""
+    from datetime import datetime, UTC, timedelta
+
+    console.print("📅 Generating Weekly Summary...", style="bold blue")
+    console.print()
+
+    # Load current state
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
+    events = store.read_all()
+    artifact_events = artifact_store.read_all_artifact_events()
+    state = project_events_to_state(events, artifact_events)
+
+    # Calculate date range
+    end_date = datetime.now(UTC)
+    start_date = end_date - timedelta(days=days)
+
+    console.print(f"📊 Week of {start_date.strftime('%B %d')} - {end_date.strftime('%B %d, %Y')}", style="dim")
+    console.print()
+
+    # Gather weekly activity
+    week_completed_tasks = []
+    week_created_tasks = []
+    week_artifacts = []
+
+    # Tasks completed this week
+    for task in state.get_completed_tasks():
+        if task.completed_at and task.completed_at >= start_date:
+            week_completed_tasks.append(task)
+
+    # Tasks created this week
+    for task in state.get_active_tasks() + state.get_completed_tasks():
+        if task.created_at and task.created_at >= start_date:
+            week_created_tasks.append(task)
+
+    # Artifacts created this week
+    for artifact in state.artifacts.values():
+        if not artifact.archived_at and artifact.created_at >= start_date:
+            week_artifacts.append(artifact)
+
+    # Weekly metrics
+    console.print("🎯 Weekly Metrics:", style="bold green")
+    console.print(f"  • Tasks completed: {len(week_completed_tasks)}", style="green")
+    console.print(f"  • New tasks created: {len(week_created_tasks)}", style="blue")
+    console.print(f"  • Artifacts captured: {len(week_artifacts)}", style="cyan")
+    console.print(f"  • Active projects: {len([p for p in state.projects.values() if any(t.project_id == p.project_id for t in state.get_active_tasks())])}", style="yellow")
+    console.print()
+
+    # Project breakdown
+    project_activity = {}
+    for task in week_completed_tasks + week_created_tasks:
+        if task.project_id and task.project_id in state.projects:
+            project_name = state.projects[task.project_id].name
+            if project_name not in project_activity:
+                project_activity[project_name] = {'completed': 0, 'created': 0, 'artifacts': 0}
+
+            if task in week_completed_tasks:
+                project_activity[project_name]['completed'] += 1
+            if task in week_created_tasks:
+                project_activity[project_name]['created'] += 1
+
+    # Add artifact counts to projects
+    for artifact in week_artifacts:
+        if artifact.task_id:
+            # Find task's project
+            for task in state.get_active_tasks() + state.get_completed_tasks():
+                if task.task_id == artifact.task_id and task.project_id and task.project_id in state.projects:
+                    project_name = state.projects[task.project_id].name
+                    if project_name in project_activity:
+                        project_activity[project_name]['artifacts'] += 1
+                    break
+
+    if project_activity:
+        console.print("📂 Project Activity:", style="bold blue")
+        for project_name, activity in sorted(project_activity.items(), key=lambda x: x[1]['completed'], reverse=True):
+            completed = activity['completed']
+            created = activity['created']
+            artifacts = activity['artifacts']
+
+            activity_parts = []
+            if completed > 0:
+                activity_parts.append(f"{completed} completed")
+            if created > 0 and created != completed:
+                activity_parts.append(f"{created} created")
+            if artifacts > 0:
+                activity_parts.append(f"{artifacts} artifacts")
+
+            activity_str = ", ".join(activity_parts) if activity_parts else "no activity"
+            console.print(f"  • {project_name}: {activity_str}", style="dim")
+        console.print()
+
+    # Top accomplishments
+    if week_completed_tasks:
+        console.print("🏆 Key Accomplishments:", style="bold green")
+        # Sort by completion time, most recent first
+        sorted_completions = sorted(week_completed_tasks, key=lambda t: t.completed_at or t.created_at, reverse=True)
+
+        for task in sorted_completions[:7]:  # Top 7 for weekly view
+            project_prefix = ""
+            if task.project_id and task.project_id in state.projects:
+                project_name = state.projects[task.project_id].name
+                project_prefix = f"[{project_name}] "
+
+            time_str = task.completed_at.strftime("%m/%d") if task.completed_at else "unknown"
+            console.print(f"  ✅ {project_prefix}{task.title} ({time_str})", style="dim green")
+
+        if len(week_completed_tasks) > 7:
+            console.print(f"  ... and {len(week_completed_tasks) - 7} more completions", style="dim")
+        console.print()
+
+    # Current focus and upcoming work
+    active_tasks = state.get_active_tasks()
+    if active_tasks:
+        console.print("🔄 Current Focus:", style="bold yellow")
+
+        # Show in-progress tasks first
+        in_progress = [t for t in active_tasks if t.status == "in_progress"][:5]
+        for task in in_progress:
+            project_prefix = ""
+            if task.project_id and task.project_id in state.projects:
+                project_name = state.projects[task.project_id].name
+                project_prefix = f"[{project_name}] "
+            console.print(f"  🟡 {project_prefix}{task.title}", style="dim yellow")
+
+        # Show overdue tasks
+        overdue_tasks = state.get_overdue_tasks()[:3]
+        if overdue_tasks:
+            console.print("  🔴 Overdue items:", style="red")
+            for task in overdue_tasks:
+                project_prefix = ""
+                if task.project_id and task.project_id in state.projects:
+                    project_name = state.projects[task.project_id].name
+                    project_prefix = f"[{project_name}] "
+                due_str = task.scheduled_for.strftime("%m/%d") if task.scheduled_for else "unknown"
+                console.print(f"     • {project_prefix}{task.title} (due {due_str})", style="dim red")
+
+        console.print()
+
+    # Communication and artifacts summary
+    if week_artifacts:
+        console.print("💬 Communications & Documents:", style="bold cyan")
+
+        artifact_types = {}
+        for artifact in week_artifacts:
+            artifact_types[artifact.artifact_type] = artifact_types.get(artifact.artifact_type, 0) + 1
+
+        type_names = {
+            'slack_msg': 'Slack messages',
+            'email': 'emails',
+            'doc': 'documents',
+            'meeting_notes': 'meeting notes',
+            'call_notes': 'call notes'
+        }
+
+        for artifact_type, count in artifact_types.items():
+            type_name = type_names.get(artifact_type, artifact_type)
+            console.print(f"  📎 {count} {type_name}", style="dim cyan")
+
+        console.print()
+
+    # Generate AI summary if we have enough data
+    if len(week_completed_tasks) > 1 or len(week_artifacts) > 2:
+        console.print("🧠 AI Weekly Analysis:", style="bold blue")
+
+        try:
+            llm_service = LLMService()
+
+            # Prepare comprehensive data for AI analysis
+            summary_data = []
+
+            # Add completed tasks
+            for task in week_completed_tasks:
+                summary_data.append({
+                    'type': 'completed_task',
+                    'title': task.title,
+                    'project': task.project_id,
+                    'completed_at': task.completed_at.isoformat() if task.completed_at else None,
+                    'priority': task.priority,
+                    'duration_minutes': task.duration_minutes
+                })
+
+            # Add new tasks created
+            for task in week_created_tasks:
+                if task not in week_completed_tasks:  # Don't double-count
+                    summary_data.append({
+                        'type': 'new_task',
+                        'title': task.title,
+                        'project': task.project_id,
+                        'created_at': task.created_at.isoformat() if task.created_at else None,
+                        'priority': task.priority,
+                        'status': task.status
+                    })
+
+            # Add artifacts
+            for artifact in week_artifacts:
+                summary_data.append({
+                    'type': 'artifact',
+                    'title': artifact.title,
+                    'artifact_type': artifact.artifact_type,
+                    'created_at': artifact.created_at.isoformat(),
+                    'task_id': artifact.task_id,
+                    'project_id': artifact.project_id,
+                    'content_preview': (artifact.content or '')[:300] if artifact.content else None
+                })
+
+            # Generate AI summary
+            def run_async_weekly_summary():
+                import asyncio
+                return asyncio.run(llm_service.summarize_events(
+                    summary_data,
+                    time_period="week",
+                    style=style
+                ))
+
+            console.print("   Analyzing productivity patterns...", style="dim cyan")
+            summary_result = run_async_weekly_summary()
+
+            ai_summary = summary_result.get('summary', 'Unable to generate weekly summary')
+            console.print(ai_summary, style="dim")
+            console.print()
+
+            # Save to file if requested
+            if output:
+                from pathlib import Path
+
+                output_dir = Path.cwd() / "outputs"
+                output_dir.mkdir(exist_ok=True)
+
+                filename = f"weekly_summary_{end_date.strftime('%Y%m%d')}.md"
+                output_path = output_dir / filename
+
+                # Create comprehensive markdown report
+                markdown_content = f"""# Weekly Summary - {start_date.strftime('%B %d')} to {end_date.strftime('%B %d, %Y')}
+
+## Metrics
+- **Tasks completed**: {len(week_completed_tasks)}
+- **New tasks created**: {len(week_created_tasks)}
+- **Artifacts captured**: {len(week_artifacts)}
+- **Active projects**: {len([p for p in state.projects.values() if any(t.project_id == p.project_id for t in state.get_active_tasks())])}
+
+## Key Accomplishments
+"""
+
+                for task in sorted_completions[:10]:
+                    project_prefix = ""
+                    if task.project_id and task.project_id in state.projects:
+                        project_name = state.projects[task.project_id].name
+                        project_prefix = f"**{project_name}**: "
+
+                    time_str = task.completed_at.strftime("%m/%d") if task.completed_at else "unknown"
+                    markdown_content += f"- {project_prefix}{task.title} _{time_str}_\n"
+
+                markdown_content += f"\n## AI Analysis\n\n{ai_summary}\n"
+
+                markdown_content += f"""
+## Project Activity
+"""
+
+                for project_name, activity in sorted(project_activity.items(), key=lambda x: x[1]['completed'], reverse=True):
+                    completed = activity['completed']
+                    created = activity['created']
+                    artifacts = activity['artifacts']
+                    markdown_content += f"- **{project_name}**: {completed} completed, {created} created, {artifacts} artifacts\n"
+
+                with open(output_path, 'w') as f:
+                    f.write(markdown_content)
+
+                console.print(f"📄 Weekly summary saved to: {output_path}", style="green")
+
+        except Exception as e:
+            console.print(f"⚠️ AI analysis failed: {str(e)}", style="yellow")
+            console.print("Basic weekly metrics shown above", style="dim")
+
+    else:
+        console.print("💡 Complete more tasks or capture artifacts for AI-powered weekly insights!", style="dim yellow")
+
+    console.print()
+    console.print("=" * 60, style="dim")
+    console.print(f"Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M')}", style="dim")
 
 
 def daily() -> None:
