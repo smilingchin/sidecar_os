@@ -7,6 +7,7 @@ from rich.panel import Panel
 from typing import Optional, List, Dict
 from datetime import datetime
 import asyncio
+from pathlib import Path
 
 from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, TaskScheduledEvent, TaskDurationSetEvent, TaskPriorityUpdatedEvent, TaskStatusUpdatedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
 from sidecar_os.core.sidecar_core.artifacts import ArtifactStore
@@ -21,6 +22,17 @@ from sidecar_os.core.sidecar_core.events.schemas import ArtifactRegisteredEvent,
 console = Console()
 
 
+def get_data_dir() -> str:
+    """Get the data directory path relative to the sidecar_os module."""
+    # Get the path of this file (core.py)
+    current_file = Path(__file__)
+    # Go up to sidecar_os directory: core.py -> commands -> cli -> sidecar_os
+    sidecar_os_dir = current_file.parent.parent.parent
+    # Data directory is at sidecar_os/data
+    data_dir = sidecar_os_dir / "data"
+    return str(data_dir)
+
+
 def add(text: str) -> None:
     """Add a new task or note with intelligent interpretation including mixed content parsing (Phase 7)."""
     # Strip whitespace for consistency
@@ -32,8 +44,8 @@ def add(text: str) -> None:
     )
 
     # Store the event
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     inbox_event_id = store.append(inbox_event)
 
     # Load current state for context (including artifacts)
@@ -246,8 +258,8 @@ def status() -> None:
     console.print("📊 Sidecar OS Status", style="bold blue")
 
     # Load and project events to current state, including artifacts
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -441,7 +453,7 @@ def status() -> None:
 def project_add(name: str, alias: Optional[str] = typer.Option(None, "--alias", "-a", help="Project alias")) -> None:
     """Manually add a new project."""
     # Basic project creation
-    store = EventStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
     project_id = name.lower().replace(' ', '-')
 
     project_event = ProjectCreatedEvent(
@@ -464,8 +476,8 @@ def project_add(name: str, alias: Optional[str] = typer.Option(None, "--alias", 
 def project_list() -> None:
     """List all projects."""
     # Load events and project state, including artifacts
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -516,8 +528,8 @@ def list_items(
 ) -> None:
     """List inbox items and tasks."""
     # Load events and project state, including artifacts
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -672,8 +684,8 @@ def update(
 ) -> None:
     """Update task properties using natural language or structured options."""
 
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -1006,8 +1018,8 @@ def update(
 def ask(question: str = typer.Argument(..., help="Natural language question about your tasks and projects")) -> None:
     """Ask natural language questions about your tasks, projects, and productivity."""
     # Load current state
-    store = EventStore("sidecar_os/data")
-    artifact_store = ArtifactStore("sidecar_os/data")
+    store = EventStore(get_data_dir())
+    artifact_store = ArtifactStore(get_data_dir())
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
