@@ -173,7 +173,7 @@ class StateProjector:
         """Apply task_status_updated event."""
         payload = event.payload
         task_id = payload.get("task_id")
-        status = payload.get("status")
+        status = payload.get("new_status")  # Fixed: use "new_status" not "status"
 
         if task_id and task_id in state.tasks and status:
             task = state.tasks[task_id]

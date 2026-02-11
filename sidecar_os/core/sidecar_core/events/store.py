@@ -101,7 +101,15 @@ class EventStore:
             InboxCapturedEvent,
             TaskCreatedEvent,
             TaskCompletedEvent,
-            TaskScheduledEvent
+            TaskScheduledEvent,
+            TaskStatusUpdatedEvent,
+            TaskPriorityUpdatedEvent,
+            ProjectCreatedEvent,
+            TaskProjectAssociatedEvent,
+            ArtifactRegisteredEvent,
+            ArtifactLinkedEvent,
+            ArtifactUnlinkedEvent,
+            ArtifactArchivedEvent
         )
 
         event_type = event_data.get("event_type")
@@ -114,6 +122,22 @@ class EventStore:
             return TaskCompletedEvent(**event_data)
         elif event_type == "task_scheduled":
             return TaskScheduledEvent(**event_data)
+        elif event_type == "task_status_updated":
+            return TaskStatusUpdatedEvent(**event_data)
+        elif event_type == "task_priority_updated":
+            return TaskPriorityUpdatedEvent(**event_data)
+        elif event_type == "project_created":
+            return ProjectCreatedEvent(**event_data)
+        elif event_type == "task_project_associated":
+            return TaskProjectAssociatedEvent(**event_data)
+        elif event_type == "artifact_registered":
+            return ArtifactRegisteredEvent(**event_data)
+        elif event_type == "artifact_linked":
+            return ArtifactLinkedEvent(**event_data)
+        elif event_type == "artifact_unlinked":
+            return ArtifactUnlinkedEvent(**event_data)
+        elif event_type == "artifact_archived":
+            return ArtifactArchivedEvent(**event_data)
         else:
             # Fallback to BaseEvent for unknown types
             return BaseEvent(**event_data)
