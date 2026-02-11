@@ -156,8 +156,8 @@ class SidecarState(BaseModel):
 
     def get_overdue_tasks(self) -> List[Task]:
         """Get tasks that are overdue (past due date)."""
-        from datetime import datetime
-        now = datetime.now()
+        from datetime import datetime, UTC
+        now = datetime.now(UTC)
         return [
             task for task in self.get_active_tasks()
             if task.scheduled_for and task.scheduled_for < now
@@ -165,8 +165,8 @@ class SidecarState(BaseModel):
 
     def get_tasks_sorted_by_due_date(self) -> List[Task]:
         """Get active tasks sorted by due date (overdue first, then by proximity)."""
-        from datetime import datetime
-        now = datetime.now()
+        from datetime import datetime, UTC
+        now = datetime.now(UTC)
 
         def sort_key(task: Task):
             if not task.scheduled_for:

@@ -601,7 +601,7 @@ class AdvancedPatternInterpreter:
                 duration_text = match.group(1).strip()
                 try:
                     # Parse duration to minutes
-                    if "hr" in pattern or "hour" in pattern:
+                    if "hr" in pattern or "hour" in pattern or r"\s*h\]" in pattern:
                         duration_minutes = int(float(duration_text) * 60)
                     else:
                         duration_minutes = int(duration_text)
