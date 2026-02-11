@@ -1133,8 +1133,8 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
             project_name = state.projects.get(state.current_focus_project, {}).name if hasattr(state.projects.get(state.current_focus_project, {}), 'name') else state.current_focus_project
             console.print(f"• Currently focused on: {project_name}", style="green")
 
-    # Task-related questions
-    elif any(phrase in question_lower for phrase in ["how many tasks", "task count", "tasks do i have"]):
+    # Simple task count questions (exact matches only)
+    elif question_lower.strip() in ["how many tasks do i have", "how many tasks", "task count", "how many active tasks", "how many completed tasks"]:
         active_tasks = state.get_active_tasks()
         completed_tasks = state.get_completed_tasks()
 
@@ -1151,8 +1151,8 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
         if pending:
             console.print(f"• Pending: {len(pending)}", style="dim")
 
-    # Project questions
-    elif any(phrase in question_lower for phrase in ["projects", "what projects", "project status"]):
+    # Simple project questions (exact matches only)
+    elif any(question_lower.strip() == phrase for phrase in ["what projects am i working on", "what projects", "project status", "show projects"]):
         console.print("📂 Project Overview:", style="bold blue")
         console.print(f"• Total projects: {len(state.projects)}", style="cyan")
 
@@ -1172,8 +1172,9 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
             for project in recent_projects:
                 console.print(f"  - {project.name}", style="dim")
 
-    # Productivity questions
-    elif any(phrase in question_lower for phrase in ["productive", "progress", "accomplishment"]):
+    # Simple productivity questions (exact matches only)
+    elif any(question_lower.strip() == phrase for phrase in ["how productive have i been", "how productive", "what progress", "what accomplishments"]):
+        from datetime import datetime
         completed_today = [t for t in state.get_completed_tasks()
                           if t.completed_at and t.completed_at.date() == datetime.now().date()]
 
@@ -1192,8 +1193,8 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
             for task in in_progress[:3]:
                 console.print(f"  🟡 {task.title}", style="dim")
 
-    # Artifact questions
-    elif any(phrase in question_lower for phrase in ["artifact", "document", "message", "email"]):
+    # Simple artifact questions (exact matches only)
+    elif any(question_lower.strip() == phrase for phrase in ["what documents do i have", "what artifacts", "show artifacts", "what documents"]):
         console.print("📎 Artifacts Overview:", style="bold blue")
         console.print(f"• Total artifacts: {len(state.artifacts)}", style="cyan")
 
@@ -1206,16 +1207,178 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
         for artifact_type, count in by_type.items():
             console.print(f"• {artifact_type}: {count}", style="dim")
 
-    # Generic fallback
+    # Advanced natural language query processing using LLM
     else:
-        console.print("🤖 I can help you with questions about:", style="bold blue")
-        console.print("• Your day: 'How is my day today?'", style="dim")
-        console.print("• Tasks: 'How many tasks do I have?'", style="dim")
-        console.print("• Projects: 'What projects am I working on?'", style="dim")
-        console.print("• Productivity: 'How productive have I been?'", style="dim")
-        console.print("• Artifacts: 'What documents do I have?'", style="dim")
-        console.print()
-        console.print(f"💡 For more advanced questions, try: ss add \"Research: {question}\"", style="dim")
+        console.print("🧠 Processing your question with AI...", style="dim cyan")
+        try:
+            llm_service = LLMService()
+
+            # Prepare context for the LLM
+            available_tasks = []
+            for task in state.get_active_tasks() + state.get_completed_tasks():
+                available_tasks.append({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "project_name": task.project_id,
+                    "priority": task.priority,
+                    "status": task.status,
+                    "created_at": task.created_at.isoformat() if task.created_at else "",
+                    "completed_at": task.completed_at.isoformat() if task.completed_at else "",
+                    "scheduled_for": task.scheduled_for.isoformat() if task.scheduled_for else ""
+                })
+
+            available_projects = []
+            for project in state.projects.values():
+                available_projects.append({
+                    "project_id": project.project_id,
+                    "name": project.name,
+                    "aliases": project.aliases,
+                    "task_count": len([t for t in state.get_active_tasks() if t.project_id == project.project_id])
+                })
+
+            # Parse the question using LLM
+            def run_async_query():
+                import asyncio
+                return asyncio.run(llm_service.parse_natural_query(
+                    question, available_tasks, available_projects
+                ))
+
+            parsed_query = run_async_query()
+
+            if parsed_query.get('confidence', 0) > 0.3:
+                # Handle the parsed query
+                query_type = parsed_query.get('query_type', 'list_tasks')
+                filters = parsed_query.get('filters', {})
+
+                # Apply filters to find matching tasks
+                matching_tasks = available_tasks.copy()
+
+                # Filter by status
+                if filters.get('status'):
+                    matching_tasks = [t for t in matching_tasks if t['status'] == filters['status']]
+
+                # Filter by project
+                if filters.get('project_name'):
+                    proj_name_lower = filters['project_name'].lower()
+                    matching_tasks = [t for t in matching_tasks if t['project_name'] and proj_name_lower in t['project_name'].lower()]
+
+                # Filter by keywords
+                if filters.get('keywords'):
+                    keywords = [k.lower() for k in filters['keywords']]
+                    matching_tasks = [t for t in matching_tasks
+                                    if any(keyword in t['title'].lower() for keyword in keywords)]
+
+                # Filter by due date
+                if filters.get('due_date_filter'):
+                    from datetime import datetime, UTC
+                    today = datetime.now(UTC).date()
+
+                    if filters['due_date_filter'] == 'today':
+                        due_today_ids = [t.task_id for t in state.get_tasks_due_today()]
+                        matching_tasks = [t for t in matching_tasks if t['task_id'] in due_today_ids]
+                    elif filters['due_date_filter'] == 'overdue':
+                        overdue_ids = [t.task_id for t in state.get_overdue_tasks()]
+                        matching_tasks = [t for t in matching_tasks if t['task_id'] in overdue_ids]
+
+                # Filter completed tasks by date if relevant
+                if filters.get('created_filter') == 'today' or 'today' in question_lower:
+                    from datetime import datetime
+                    today = datetime.now().date()
+                    matching_tasks = [t for t in matching_tasks
+                                    if t['completed_at'] and
+                                    datetime.fromisoformat(t['completed_at'].replace('Z', '+00:00')).date() == today]
+
+                # Check if user is asking about artifacts
+                asking_about_artifacts = any(word in question_lower for word in ['artifact', 'document', 'email', 'message', 'attachment', 'link', 'file'])
+
+                # Filter tasks to only those with artifacts if asking about artifacts
+                if asking_about_artifacts:
+                    tasks_with_artifacts_filtered = []
+                    for task in matching_tasks:
+                        task_artifacts = state.get_artifacts_for_task(task['task_id'])
+                        if task_artifacts:
+                            tasks_with_artifacts_filtered.append(task)
+                    matching_tasks = tasks_with_artifacts_filtered
+
+                # Display results
+                if query_type == 'count_tasks':
+                    console.print(f"📊 Found {len(matching_tasks)} matching tasks", style="bold blue")
+                elif query_type == 'list_tasks' and matching_tasks:
+                    if asking_about_artifacts:
+                        console.print(f"📋 Found {len(matching_tasks)} tasks with artifacts:", style="bold blue")
+
+                        # Show tasks with their linked artifacts
+                        for task in matching_tasks[:10]:  # Show first 10
+                            status_icon = "✅" if task['status'] == 'completed' else "🟡" if task['status'] == 'in_progress' else "⚪"
+
+                            # Add completion time for completed tasks
+                            time_info = ""
+                            if task['completed_at'] and 'today' in question_lower:
+                                try:
+                                    completed_dt = datetime.fromisoformat(task['completed_at'].replace('Z', '+00:00'))
+                                    time_info = f" (completed {completed_dt.strftime('%H:%M')})"
+                                except:
+                                    pass
+
+                            project_prefix = f"[{task['project_name']}] " if task['project_name'] else ""
+
+                            # Get artifacts for this task
+                            task_artifacts = state.get_artifacts_for_task(task['task_id'])
+
+                            console.print(f"  {status_icon} {project_prefix}{task['title']}{time_info}", style="white" if task['status'] == 'completed' else "dim")
+
+                            # Show artifacts (we know they exist since we pre-filtered)
+                            for artifact in task_artifacts:
+                                artifact_icon = "📎" if artifact.artifact_type == 'doc' else "📧" if artifact.artifact_type == 'email' else "💬" if artifact.artifact_type == 'slack_msg' else "📄"
+                                console.print(f"      {artifact_icon} {artifact.title}", style="dim cyan")
+                                if artifact.url:
+                                    console.print(f"         🔗 {artifact.url}", style="dim blue")
+
+                        if len(matching_tasks) > 10:
+                            console.print(f"  ... and {len(matching_tasks) - 10} more tasks", style="dim")
+                    else:
+                        console.print(f"📋 Found {len(matching_tasks)} matching tasks:", style="bold blue")
+
+                        for task in matching_tasks[:10]:  # Show first 10
+                            status_icon = "✅" if task['status'] == 'completed' else "🟡" if task['status'] == 'in_progress' else "⚪"
+
+                            # Add completion time for completed tasks
+                            time_info = ""
+                            if task['completed_at'] and 'today' in question_lower:
+                                try:
+                                    completed_dt = datetime.fromisoformat(task['completed_at'].replace('Z', '+00:00'))
+                                    time_info = f" (completed {completed_dt.strftime('%H:%M')})"
+                                except:
+                                    pass
+
+                            project_prefix = f"[{task['project_name']}] " if task['project_name'] else ""
+                            console.print(f"  {status_icon} {project_prefix}{task['title']}{time_info}", style="white" if task['status'] == 'completed' else "dim")
+
+                        if len(matching_tasks) > 10:
+                            console.print(f"  ... and {len(matching_tasks) - 10} more", style="dim")
+
+                elif not matching_tasks:
+                    if asking_about_artifacts:
+                        console.print("📭 No tasks found with artifacts matching your criteria", style="yellow")
+                    else:
+                        console.print("📭 No tasks match your criteria", style="yellow")
+
+            else:
+                # Low confidence, fall back to basic help
+                console.print("🤖 I can help you with questions about:", style="bold blue")
+                console.print("• Your day: 'How is my day today?'", style="dim")
+                console.print("• Tasks: 'How many tasks do I have?', 'What are my completed tasks?'", style="dim")
+                console.print("• Projects: 'What projects am I working on?'", style="dim")
+                console.print("• Productivity: 'How productive have I been?'", style="dim")
+                console.print("• Artifacts: 'What documents do I have?'", style="dim")
+                console.print()
+                console.print(f"💡 For research questions, try: ss add \"Research: {question}\"", style="dim")
+
+        except Exception as e:
+            console.print(f"⚠️ Question processing failed: {str(e)}", style="yellow")
+            console.print("🤖 Try asking simpler questions like:", style="dim")
+            console.print("• 'What are my completed tasks?'", style="dim")
+            console.print("• 'How many tasks do I have?'", style="dim")
 
 
 def focus() -> None:
