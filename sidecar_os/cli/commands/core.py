@@ -628,7 +628,7 @@ def project_list() -> None:
     projects_table.add_column("Tasks", justify="center", width=8)
     projects_table.add_column("Artifacts", justify="center", width=10)
 
-    for project in state.get_recent_projects():
+    for project in sorted(state.projects.values(), key=lambda x: x.name.lower()):
         # Count tasks and artifacts for this project
         task_count = len(state.get_tasks_for_project(project.project_id))
         artifact_count = len(state.get_artifacts_for_project(project.project_id))
@@ -722,7 +722,8 @@ def list_items(
             try:
                 if task.project_id and task.project_id in state.projects:
                     project_name = state.projects[task.project_id].name
-                    formatted_title = f"[{project_name}] {task.title}"
+                    # Escape brackets for Rich markup to treat them as literal text
+                    formatted_title = f"\\[{project_name}] {task.title}"
                 else:
                     formatted_title = task.title
 
