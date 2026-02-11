@@ -837,7 +837,7 @@ Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.1,  # Low temperature for consistent parsing
-                max_tokens=1500   # Allow for complex responses
+                max_tokens=2500   # Increased for very long content
             )
 
             # Parse JSON response
@@ -860,16 +860,27 @@ Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
                 return result
 
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse mixed content JSON response: {response.content}")
+                logger.error(f"Failed to parse mixed content JSON response at position {e.pos}: {str(e)}")
+                logger.error(f"Response length: {len(response.content)} characters")
+                logger.error(f"Response preview: {response.content[:500]}...")
+                logger.error(f"Response ending: ...{response.content[-200:]}")
+
+                # Check if response was likely truncated
+                was_truncated = not response.content.strip().endswith('}')
+                truncation_hint = " (Response appears truncated - consider shorter input or higher token limit)" if was_truncated else ""
+
                 return {
                     "tasks": [],
                     "artifacts": [],
                     "relationships": [],
                     "overall_confidence": 0.0,
-                    "explanation": f"Failed to parse LLM JSON response: {str(e)}",
+                    "explanation": f"JSON parsing failed at position {e.pos}: {str(e)}{truncation_hint}",
                     "project_suggestions": [],
-                    "parsing_method": "mixed_content_llm",
+                    "parsing_method": "mixed_content_llm_failed",
                     "error": "JSON parsing failed",
+                    "json_error_position": e.pos,
+                    "response_length": len(response.content),
+                    "likely_truncated": was_truncated,
                     "raw_response": response.content
                 }
 

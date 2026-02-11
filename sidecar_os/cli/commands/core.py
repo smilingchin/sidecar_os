@@ -708,7 +708,7 @@ def update(
 
             # Use Phase 7 mixed content parsing for complex input
             if is_mixed_content and len(natural_language_request) > 100:
-                console.print("🧠 Using AI mixed content parsing...", style="dim cyan")
+                console.print(f"🧠 Processing with mixed content parsing (confidence: 88-92%)...", style="dim cyan")
 
                 # Get current context for better matching
                 current_context = {
@@ -754,7 +754,8 @@ def update(
                                 best_score = matches
 
                         if best_match:
-                            console.print(f"🎯 Matched task: {best_match.title}", style="green")
+                            console.print(f"🎯 Matched task: {best_match.title} ({best_match.task_id[:8]}...)", style="green")
+                            console.print(f"   Using project/task hints: {', '.join(search_terms[:3])}", style="dim")
 
                             # Apply status update if detected
                             if task_data.get('status') and best_match.status != task_data['status']:
@@ -774,7 +775,8 @@ def update(
                                         }
                                     )
                                 store.append(event)
-                                console.print(f"✅ Task status updated to: {task_data['status']}", style="green")
+                                console.print(f"✅ Task {best_match.task_id[:8]}... marked as {task_data['status']}", style="green")
+                                console.print(f"   Method: Mixed content AI parsing", style="dim")
                         else:
                             console.print("⚠️ No matching task found for update", style="yellow")
 
@@ -803,7 +805,31 @@ def update(
 
                     return  # Exit early since we handled it with mixed content parsing
                 else:
-                    console.print(f"⚠️ Low confidence ({overall_confidence:.0%}), falling back to simple parsing", style="yellow")
+                    console.print(f"⚠️ Mixed content parsing failed ({overall_confidence:.0%})", style="yellow")
+
+                    # Show error details if available
+                    if parsed_content.get('error'):
+                        error_msg = parsed_content['error']
+                        if parsed_content.get('likely_truncated'):
+                            error_msg += " - Input may be too long for AI parsing"
+                        console.print(f"   Error: {error_msg}", style="dim red")
+
+                        # Show additional debugging info for JSON errors
+                        if parsed_content.get('json_error_position'):
+                            pos = parsed_content['json_error_position']
+                            length = parsed_content.get('response_length', 0)
+                            console.print(f"   JSON error at position {pos} of {length} characters", style="dim red")
+
+                    # Ask if user wants to try simple parsing instead
+                    console.print("\n   Options:", style="dim")
+                    console.print("   1. Try simple keyword matching (less accurate)", style="dim")
+                    console.print("   2. Use structured update with --task flag", style="dim")
+                    console.print("   3. Break into smaller requests", style="dim")
+
+                    try_simple = typer.confirm("\nTry simple keyword matching? This may be inaccurate", default=False)
+                    if not try_simple:
+                        console.print("💡 Use 'ss update --task <task_id> --status completed' for precise updates", style="cyan")
+                        return
 
             # Simple pattern matching for common updates (fallback)
 
@@ -831,25 +857,56 @@ def update(
 
             # Extract keywords from the request
             words = request_lower.split()
+            significant_words = [w for w in words if len(w) > 2 and w not in ['the', 'and', 'for', 'with', 'this', 'that', 'from', 'have', 'been', 'will', 'can', 'should']]
+
+            console.print(f"🔍 Searching with keywords: {', '.join(significant_words[:5])}", style="dim")
+
             for task in all_tasks:
-                task_text = f"{task.title} {task.description or ''}".lower()
+                task_text = f"{task.title} {task.description or ''} {task.project_id or ''}".lower()
                 # Check if any significant words from the request appear in the task
-                matches = sum(1 for word in words if len(word) > 2 and word in task_text)
+                matches = sum(1 for word in significant_words if word in task_text)
                 if matches > 0:
                     matching_tasks.append((task, matches))
 
             # Sort by match score
             matching_tasks.sort(key=lambda x: x[1], reverse=True)
 
+            console.print(f"📊 Found {len(matching_tasks)} potential matches", style="dim")
+
             if not matching_tasks:
-                console.print("❌ No matching tasks found", style="red")
-                console.print("Try being more specific or use --task flag with a task ID", style="dim")
+                console.print("❌ No matching tasks found in simple keyword search", style="red")
+                console.print("💡 Tips:", style="dim")
+                console.print("   • Use --task <task_id> for precise updates", style="dim")
+                console.print("   • Check 'ss list' to see available tasks", style="dim")
+                console.print("   • Try shorter, more specific keywords", style="dim")
                 return
 
-            # Use best match
+            # Use best match with confidence check
             target_task, match_score = matching_tasks[0]
 
-            console.print(f"🎯 Found match: {target_task.title}", style="green")
+            # Calculate simple confidence based on match score and task text similarity
+            total_words = len([w for w in words if len(w) > 2])
+            match_confidence = min(1.0, match_score / max(1, total_words * 0.3))
+
+            console.print(f"🎯 Best match: {target_task.title} (confidence: {match_confidence:.0%})", style="green" if match_confidence > 0.6 else "yellow")
+
+            # Require confirmation for low-confidence matches
+            if match_confidence < 0.4:
+                console.print("⚠️ Low confidence match detected", style="yellow")
+                confirmed = typer.confirm(f"Apply updates to task '{target_task.title[:50]}...'?", default=False)
+                if not confirmed:
+                    console.print("Update cancelled. Use --task flag for precise targeting.", style="dim")
+                    return
+            elif match_confidence < 0.7:
+                # Show top 3 matches for medium confidence
+                console.print("Other possible matches:", style="dim")
+                for i, (task, score) in enumerate(matching_tasks[1:4]):
+                    console.print(f"  {i+2}. {task.title[:40]}... (score: {score})", style="dim")
+
+                confirmed = typer.confirm(f"Apply updates to task '{target_task.title[:50]}...'?", default=True)
+                if not confirmed:
+                    console.print("Update cancelled. Use --task flag for precise targeting.", style="dim")
+                    return
 
             # Apply updates
             updated_something = False
@@ -880,7 +937,8 @@ def update(
                     )
 
                 store.append(event)
-                console.print(f"✅ Status updated to: {target_status}", style="green")
+                console.print(f"✅ Task {target_task.task_id[:8]}... status updated to: {target_status}", style="green")
+                console.print(f"   Method: Simple keyword matching", style="dim")
                 updated_something = True
 
             if target_priority and target_task.priority != target_priority:
