@@ -147,8 +147,8 @@ class SidecarState(BaseModel):
 
     def get_tasks_due_today(self) -> List[Task]:
         """Get tasks due today."""
-        from datetime import date
-        today = date.today()
+        from datetime import datetime, UTC
+        today = datetime.now(UTC).date()
         return [
             task for task in self.get_active_tasks()
             if task.scheduled_for and task.scheduled_for.date() == today
