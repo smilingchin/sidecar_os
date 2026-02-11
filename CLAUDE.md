@@ -16,6 +16,7 @@
 ### Tech Stack
 - Python 3.12, uv for dependency management
 - typer (CLI framework), pydantic (data validation), rich (terminal output)
+- **IMPORTANT**: Always use UV commands: `uv add`, `uv sync`, `uv run`, NOT pip
 
 ### Architecture (see REQUIREMENTS.md for detailed mental model)
 - `sidecar_core/events`: event schemas + append/read functionality
@@ -42,7 +43,7 @@
 **IMPORTANT**: Build incrementally with this cycle for each feature:
 
 1. **Build**: Implement one specific functionality (e.g., event store, add command, status view)
-2. **Test**: Write and run unit tests for the functionality
+2. **Test**: Write and run unit tests for the functionality using `uv run pytest`
 3. **Commit**: Commit the working, tested code with clear commit message
 4. **Push**: Push to remote repository
 5. **Next**: Move to the next functionality
@@ -56,3 +57,27 @@
 - Each commit should pass all tests
 - Push frequently to maintain backup and enable collaboration
 - Only commit code files and synthetic examples, never design documents or real user data
+
+### Session Checkpoints
+**IMPORTANT**: Create development checkpoints periodically to maintain context across sessions:
+
+1. **After Major Milestones**: Create checkpoint when significant features are completed
+2. **End of Complex Sessions**: Summarize progress, decisions, and next steps
+3. **Before Architecture Changes**: Document current state before major refactoring
+
+**Checkpoint Process:**
+1. **Update** `claude-checkpoint/current-state.md` with latest architecture and status
+2. **Create** `claude-checkpoint/session-YYYY-MM-DD.md` with session summary
+3. **Include**: Key implementations, testing results, discoveries, next steps
+4. **Focus**: Technical decisions, user experience insights, architectural learnings
+
+**Checkpoint Structure:**
+```
+claude-checkpoint/
+├── README.md              # Checkpoint system explanation
+├── current-state.md       # Always up-to-date project status
+├── session-YYYY-MM-DD.md  # Individual session summaries
+└── architecture-overview.md # High-level system design
+```
+
+This enables resuming work efficiently and maintains development history outside of git commits.

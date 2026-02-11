@@ -47,6 +47,12 @@ class TaskScheduledEvent(BaseEvent):
     event_type: Literal["task_scheduled"] = "task_scheduled"
 
 
+class TaskDurationSetEvent(BaseEvent):
+    """Event for setting task duration estimates."""
+
+    event_type: Literal["task_duration_set"] = "task_duration_set"
+
+
 class TaskProjectAssociatedEvent(BaseEvent):
     """Event for associating an existing task with a project."""
 
@@ -89,6 +95,7 @@ Event = (
     TaskCreatedEvent |
     TaskCompletedEvent |
     TaskScheduledEvent |
+    TaskDurationSetEvent |
     TaskProjectAssociatedEvent |
     ProjectCreatedEvent |
     ProjectFocusedEvent |

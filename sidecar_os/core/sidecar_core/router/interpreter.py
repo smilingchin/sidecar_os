@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from uuid import uuid4
 
-from ..events.schemas import BaseEvent, ProjectCreatedEvent, TaskCreatedEvent, ClarificationRequestedEvent
+from ..events.schemas import BaseEvent, ProjectCreatedEvent, TaskCreatedEvent, TaskScheduledEvent, TaskDurationSetEvent, ClarificationRequestedEvent
 from ..state.models import SidecarState, Project
 from ..llm import LLMService, LLMConfig
 from ..projects import ProjectMatcher, ProjectMatchResult
@@ -79,6 +79,24 @@ class AdvancedPatternInterpreter:
         (r"(?:progress|status|update):?\s+(.+)", 0.8),
         (r"(?:ran|executed|performed|did)\s+(.+)", 0.75),
         (r"(?:\+\d+pp|\+\d+\%|\-\d+pp|\-\d+\%|improved|worse|better)", 0.8),  # Performance metrics
+    ]
+
+    # Temporal patterns for due dates and durations
+    DUE_DATE_PATTERNS = [
+        (r"(?:by|due|deadline)\s+(today|tomorrow|this\s+week|next\s+week)", 0.9),
+        (r"(?:by|due|deadline)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", 0.85),
+        (r"(?:by|due|deadline)\s+(\d{1,2}\/\d{1,2}|\d{1,2}-\d{1,2})", 0.8),
+        (r"(?:by|due|deadline)\s+(end\s+of\s+(?:week|month|year))", 0.75),
+        (r"(?:by|due|deadline)\s+(in\s+\d+\s+(?:days?|weeks?))", 0.8),
+    ]
+
+    DURATION_PATTERNS = [
+        (r"\[(\d+(?:\.\d+)?)\s*(?:hrs?|hours?)\]", 0.95),  # [2 hrs], [1.5 hours]
+        (r"\[(\d+)\s*(?:mins?|minutes?)\]", 0.95),         # [30min], [45 minutes]
+        (r"\[(\d+(?:\.\d+)?)\s*h\]", 0.9),                # [1.5h]
+        (r"\[(\d+)\s*m\]", 0.9),                          # [30m]
+        (r"(?:takes?|duration|estimate)\s+(\d+)\s*(?:mins?|minutes?)", 0.8),
+        (r"(?:takes?|duration|estimate)\s+(\d+(?:\.\d+)?)\s*(?:hrs?|hours?)", 0.8),
     ]
 
     def __init__(self, config: Optional[InterpreterConfig] = None):
@@ -162,6 +180,30 @@ class AdvancedPatternInterpreter:
         promise_match = self._analyze_promise_patterns(clean_text)
         update_match = self._analyze_update_patterns(clean_text)
 
+        # Analyze temporal patterns (due dates and durations) - only if confident about task/project
+        temporal_result = None
+        try:
+            if task_match and task_match[1] > 0.6:  # Only analyze temporal if we have a good task match
+                temporal_result = asyncio.run(self._analyze_temporal_patterns(text))
+            else:
+                # Quick pattern-only temporal analysis to avoid LLM calls
+                temporal_result = {
+                    "due_date": None,
+                    "duration_minutes": None,
+                    "confidence": 0.0,
+                    "method": "patterns",
+                    "explanation": "No temporal analysis (low task confidence)"
+                }
+        except Exception as e:
+            print(f"Temporal analysis failed: {e}")
+            temporal_result = {
+                "due_date": None,
+                "duration_minutes": None,
+                "confidence": 0.0,
+                "method": "error",
+                "explanation": f"Temporal analysis error: {e}"
+            }
+
         # Build interpretation result (existing logic)
         events = []
         explanations = []
@@ -194,11 +236,35 @@ class AdvancedPatternInterpreter:
                     project_id=project_match[0] if project_match and project_match[1] > 0.6 else None
                 )
                 events.append(task_event)
-                explanations.append(f"Created task '{title}' ({confidence:.0%} confidence)")
+                task_id = task_event.payload["task_id"]
+
+                # Add temporal events if temporal information was detected
+                if temporal_result and temporal_result.get("confidence", 0) > 0.5:
+                    if temporal_result.get("due_date") or temporal_result.get("due_date_text"):
+                        scheduled_event = self._create_task_scheduled_event(
+                            task_id,
+                            temporal_result.get("due_date") or temporal_result.get("due_date_text")
+                        )
+                        if scheduled_event:
+                            events.append(scheduled_event)
+
+                    if temporal_result.get("duration_minutes"):
+                        duration_event = self._create_task_duration_event(
+                            task_id,
+                            temporal_result["duration_minutes"]
+                        )
+                        events.append(duration_event)
+
+                # Update explanations
+                task_explanation = f"Created task '{title}' ({confidence:.0%} confidence)"
+                if temporal_result and temporal_result.get("confidence", 0) > 0.5:
+                    task_explanation += f" with {temporal_result['method']} temporal parsing"
+                explanations.append(task_explanation)
                 max_confidence = max(max_confidence, confidence)
             else:
                 # Task pattern matched but needs clarification for context
-                max_confidence = 0.2  # Force immediate clarification
+                # Don't override the pattern confidence, but flag for clarification
+                max_confidence = max(max_confidence, confidence)  # Keep actual pattern confidence
                 explanations.append(f"Task needs clarification despite {confidence:.0%} pattern match")
 
                 # Generate clarification questions directly
@@ -510,10 +576,122 @@ class AdvancedPatternInterpreter:
                 return (update, confidence, f"Update pattern match: {pattern}")
         return None
 
+    def _analyze_due_date_patterns(self, text: str) -> Optional[tuple]:
+        """Analyze text for due date patterns.
+
+        Returns:
+            tuple: (due_date_text, confidence, explanation) or None
+        """
+        for pattern, confidence in self.DUE_DATE_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                due_text = match.group(1).strip()
+                return (due_text, confidence, f"Due date pattern: '{due_text}'")
+        return None
+
+    def _analyze_duration_patterns(self, text: str) -> Optional[tuple]:
+        """Analyze text for duration patterns.
+
+        Returns:
+            tuple: (duration_minutes, confidence, explanation) or None
+        """
+        for pattern, confidence in self.DURATION_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                duration_text = match.group(1).strip()
+                try:
+                    # Parse duration to minutes
+                    if "hr" in pattern or "hour" in pattern:
+                        duration_minutes = int(float(duration_text) * 60)
+                    else:
+                        duration_minutes = int(duration_text)
+
+                    if duration_minutes > 0 and duration_minutes <= 24 * 60:  # Max 24 hours
+                        return (duration_minutes, confidence, f"Duration: {duration_minutes}min")
+                except (ValueError, TypeError):
+                    continue
+        return None
+
+    async def _analyze_temporal_patterns(self, text: str) -> Dict[str, Any]:
+        """Extract temporal information using hybrid pattern + LLM approach.
+
+        Returns:
+            Dictionary with temporal parsing results
+        """
+        # First try basic patterns (fast path)
+        due_date_match = self._analyze_due_date_patterns(text)
+        duration_match = self._analyze_duration_patterns(text)
+
+        # If both patterns found with high confidence, use them
+        if (due_date_match and due_date_match[1] > 0.8 and
+            duration_match and duration_match[1] > 0.8):
+            return {
+                "due_date_text": due_date_match[0],
+                "duration_minutes": duration_match[0],
+                "confidence": min(due_date_match[1], duration_match[1]),
+                "method": "patterns",
+                "explanation": f"{due_date_match[2]}, {duration_match[2]}"
+            }
+
+        # Fall back to LLM for complex temporal expressions
+        if self.config.use_llm and self.llm_service:
+            try:
+                llm_result = await self.llm_service.parse_temporal_expressions(text)
+
+                # Combine pattern results with LLM results
+                final_result = {
+                    "due_date": llm_result.get("due_date"),
+                    "duration_minutes": llm_result.get("duration_minutes"),
+                    "confidence": llm_result.get("confidence", 0.5),
+                    "method": "llm",
+                    "explanation": llm_result.get("explanation", "LLM temporal parsing")
+                }
+
+                # Override with high-confidence pattern results if available
+                if due_date_match and due_date_match[1] > 0.8:
+                    final_result["due_date_text"] = due_date_match[0]
+                    final_result["confidence"] = max(final_result["confidence"], due_date_match[1])
+                    final_result["method"] = "hybrid"
+
+                if duration_match and duration_match[1] > 0.8:
+                    final_result["duration_minutes"] = duration_match[0]
+                    final_result["confidence"] = max(final_result["confidence"], duration_match[1])
+                    final_result["method"] = "hybrid"
+
+                return final_result
+
+            except Exception as e:
+                print(f"LLM temporal parsing failed: {e}")
+
+        # Return pattern results if available, even if low confidence
+        result = {
+            "due_date": None,
+            "duration_minutes": None,
+            "confidence": 0.0,
+            "method": "patterns",
+            "explanation": "No temporal patterns detected"
+        }
+
+        if due_date_match:
+            result["due_date_text"] = due_date_match[0]
+            result["confidence"] = due_date_match[1]
+            result["explanation"] = due_date_match[2]
+
+        if duration_match:
+            result["duration_minutes"] = duration_match[0]
+            result["confidence"] = max(result["confidence"], duration_match[1])
+            if "explanation" in result and result["explanation"] != "No temporal patterns detected":
+                result["explanation"] += f", {duration_match[2]}"
+            else:
+                result["explanation"] = duration_match[2]
+
+        return result
+
     def _task_needs_clarification(self, text: str, project_match: Optional[tuple], current_state: SidecarState) -> bool:
         """Check if a task pattern match needs clarification for context/actionability."""
 
         # Check for vague reference patterns using regex for flexibility
+        # Exclude common development terms that are actually specific
         vague_patterns = [
             r"\bthe\s+team\b", r"\bthe\s+meeting\b", r"\bthe\s+call\b",
             r"\bthe\s+documents?\b", r"\bthe\s+files?\b", r"\bthe\s+thing\b",
@@ -524,8 +702,30 @@ class AdvancedPatternInterpreter:
             r"\bthe\s+requirements?\b", r"\bthe\s+specs?\b"
         ]
 
+        # Exclude well-known development terms that don't need clarification
+        specific_terms = ["pr", "pull request", "bug", "feature", "api", "database", "db", "server",
+                         "client", "user", "admin", "login", "authentication", "auth", "code", "repo",
+                         "repository", "branch", "merge", "deploy", "deployment", "test", "tests"]
+
         text_lower = text.lower()
-        has_vague_references = any(re.search(pattern, text_lower) for pattern in vague_patterns)
+
+        # Check for vague patterns but exclude specific development terms
+        has_vague_references = False
+        for pattern in vague_patterns:
+            matches = re.finditer(pattern, text_lower)
+            for match in matches:
+                # Extract the word after "the"/"that"/"this"
+                if "the " in match.group():
+                    word_after = match.group().split()[-1]
+                else:
+                    word_after = match.group().split()[-1] if match.groups() else ""
+
+                # If it's not a specific known term, consider it vague
+                if word_after.lower() not in specific_terms:
+                    has_vague_references = True
+                    break
+            if has_vague_references:
+                break
 
         # Check if task lacks project context
         has_no_project_context = not project_match or project_match[1] < 0.6
@@ -537,6 +737,10 @@ class AdvancedPatternInterpreter:
         # Check if task contains question words suggesting uncertainty
         question_indicators = ["which", "what", "who", "when", "where", "how"]
         has_question_indicators = any(word in text_lower for word in question_indicators)
+
+        # Debug for testing
+        # print(f"CLARIFICATION DEBUG: text='{text}', vague={has_vague_references}, no_proj={has_no_project_context}, "
+        #       f"pronouns={has_ambiguous_pronouns}, questions={has_question_indicators}")
 
         # Task needs clarification if:
         # 1. Has vague references AND no clear project context
@@ -552,13 +756,22 @@ class AdvancedPatternInterpreter:
             return True
 
         # Additional check: if it's a very generic task without specific details
-        generic_task_patterns = [
-            "follow up", "check on", "look into", "work on", "handle",
-            "deal with", "take care of", "review", "update", "fix"
+        # Check for generic patterns only when they're standalone or very vague
+        generic_patterns = [
+            r"\bfollow up\b(?:\s+on)?\s*$",  # "follow up" at end or "follow up on"
+            r"\bcheck on\b\s*$",            # "check on" at end
+            r"\blook into\b\s*$",           # "look into" at end
+            r"\bwork on\b\s*$",             # "work on" at end
+            r"\bhandle\b\s*$",              # "handle" at end
+            r"\bdeal with\b\s*$",           # "deal with" at end
+            r"\btake care of\b\s*$",        # "take care of" at end
+            r"\breview\b\s*$",              # "review" alone at end
+            r"\bupdate\b\s*$",              # "update" alone at end
+            r"\bfix\b\s*$"                  # "fix" alone at end
         ]
 
-        is_generic_task = any(pattern in text_lower for pattern in generic_task_patterns)
-        is_very_short = len(text.split()) <= 6
+        is_generic_task = any(re.search(pattern, text_lower) for pattern in generic_patterns)
+        is_very_short = len(text.split()) <= 4  # Make this more restrictive
 
         if is_generic_task and is_very_short and has_no_project_context:
             return True
@@ -640,6 +853,75 @@ class AdvancedPatternInterpreter:
             payload["project_id"] = project_id
 
         return TaskCreatedEvent(payload=payload)
+
+    def _create_task_scheduled_event(self, task_id: str, due_date_info: Any) -> Optional[TaskScheduledEvent]:
+        """Create a task scheduled event with due date information."""
+        try:
+            # Handle different due date formats
+            if isinstance(due_date_info, str):
+                # If it's already an ISO format date string, use it directly
+                if 'T' in due_date_info and due_date_info.endswith('Z') or '+' in due_date_info:
+                    scheduled_for = due_date_info
+                else:
+                    # It's a relative date text like "Friday", "tomorrow" - convert using simple logic
+                    scheduled_for = self._convert_relative_date_to_iso(due_date_info)
+            else:
+                # Assume it's already in proper format
+                scheduled_for = str(due_date_info)
+
+            if scheduled_for:
+                return TaskScheduledEvent(payload={
+                    "task_id": task_id,
+                    "scheduled_for": scheduled_for
+                })
+
+        except Exception as e:
+            print(f"Failed to create scheduled event: {e}")
+
+        return None
+
+    def _create_task_duration_event(self, task_id: str, duration_minutes: int) -> TaskDurationSetEvent:
+        """Create a task duration set event."""
+        return TaskDurationSetEvent(payload={
+            "task_id": task_id,
+            "duration_minutes": duration_minutes
+        })
+
+    def _convert_relative_date_to_iso(self, relative_date: str) -> Optional[str]:
+        """Convert relative date strings to ISO format dates."""
+        from datetime import datetime, timedelta
+
+        now = datetime.now(UTC)
+        relative_lower = relative_date.lower().strip()
+
+        # Handle common relative dates
+        if relative_lower in ["today"]:
+            target_date = now
+        elif relative_lower in ["tomorrow"]:
+            target_date = now + timedelta(days=1)
+        elif relative_lower in ["this week"]:
+            # End of this week (Sunday)
+            days_until_sunday = 6 - now.weekday()
+            target_date = now + timedelta(days=days_until_sunday)
+        elif relative_lower in ["next week"]:
+            # End of next week
+            days_until_next_sunday = 6 - now.weekday() + 7
+            target_date = now + timedelta(days=days_until_next_sunday)
+        elif relative_lower in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            # Next occurrence of the specified weekday
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            target_weekday = weekdays.index(relative_lower)
+            days_ahead = target_weekday - now.weekday()
+            if days_ahead <= 0:  # Target day already happened this week
+                days_ahead += 7
+            target_date = now + timedelta(days=days_ahead)
+        else:
+            # Can't parse this relative date
+            return None
+
+        # Set time to end of day (11:59 PM) for due dates
+        target_date = target_date.replace(hour=23, minute=59, second=59, microsecond=0)
+        return target_date.isoformat()
 
     def _create_clarification_event(self, original_text: str, questions: List[str]) -> ClarificationRequestedEvent:
         """Create a clarification requested event."""

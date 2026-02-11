@@ -6,6 +6,7 @@ import logging
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, UTC
 
 from .providers.base import (
     LLMProvider,
@@ -284,6 +285,135 @@ Be conservative with confidence scores. Only use high confidence (>0.8) when ver
                 "type": "error",
                 "confidence": 0.0,
                 "explanation": f"Interpretation failed: {str(e)}",
+                "error": str(e)
+            }
+
+    async def parse_temporal_expressions(
+        self,
+        text: str,
+        current_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Parse due dates and durations from text using LLM.
+
+        Args:
+            text: Text to analyze for temporal expressions
+            current_date: Current date for relative date interpretation
+
+        Returns:
+            Dictionary with parsed temporal information
+        """
+        if current_date is None:
+            current_date = datetime.now(UTC)
+
+        system_prompt = f"""You are a temporal expression parser. Extract due dates and durations from natural language text.
+
+Current context:
+- Today's date: {current_date.strftime('%A, %B %d, %Y')} ({current_date.date().isoformat()})
+- Current time: {current_date.strftime('%I:%M %p')}
+
+Parse these temporal expressions:
+- Due dates: "by Friday", "tomorrow", "Feb 15", "end of month", "in 3 days"
+- Durations: "[30min]", "[2 hrs]", "[1.5h]", brackets indicate duration
+
+Rules:
+- "Friday" = next Friday from today
+- "tomorrow" = next day
+- "Feb 15" = Feb 15 of current/next year (whichever is sooner)
+- Duration formats: [30min], [2 hrs], [1.5h], [20 minutes]
+- If no explicit due date, set to null
+- If no explicit duration, set to null
+
+Respond with JSON:
+{{
+    "due_date": "ISO_FORMAT_WITH_TIME or null",
+    "duration_minutes": integer_or_null,
+    "confidence": float_between_0_and_1,
+    "explanation": "brief explanation of interpretation"
+}}
+
+Be conservative with confidence. Only high confidence (>0.8) for very clear expressions."""
+
+        prompt = f"""Parse temporal expressions from: "{text}"
+
+Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
+
+        try:
+            response = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                max_tokens=300,
+                temperature=0.1
+            )
+
+            # Parse JSON response, handling markdown formatting
+            try:
+                content = response.content.strip()
+
+                # Remove markdown code block formatting if present
+                if content.startswith('```json'):
+                    content = content[7:]  # Remove ```json
+                if content.endswith('```'):
+                    content = content[:-3]  # Remove ```
+                content = content.strip()
+
+                result = json.loads(content)
+
+                # Validate and clean up the result
+                if result.get("due_date") and result["due_date"] != "null":
+                    try:
+                        # Validate the ISO format
+                        parsed_date = datetime.fromisoformat(result["due_date"].replace('Z', '+00:00'))
+                        result["due_date"] = parsed_date.isoformat()
+                    except (ValueError, AttributeError):
+                        result["due_date"] = None
+                        result["confidence"] = max(0.0, result.get("confidence", 0.0) - 0.2)
+                else:
+                    result["due_date"] = None
+
+                # Validate duration
+                if result.get("duration_minutes"):
+                    try:
+                        duration = int(result["duration_minutes"])
+                        if duration <= 0 or duration > 24 * 60:  # Max 24 hours
+                            result["duration_minutes"] = None
+                            result["confidence"] = max(0.0, result.get("confidence", 0.0) - 0.1)
+                        else:
+                            result["duration_minutes"] = duration
+                    except (ValueError, TypeError):
+                        result["duration_minutes"] = None
+                        result["confidence"] = max(0.0, result.get("confidence", 0.0) - 0.1)
+                else:
+                    result["duration_minutes"] = None
+
+                # Ensure confidence is valid
+                confidence = result.get("confidence", 0.5)
+                if not isinstance(confidence, (int, float)) or confidence < 0.0:
+                    confidence = 0.5
+                elif confidence > 1.0:
+                    confidence = 1.0
+                result["confidence"] = float(confidence)
+
+                result["llm_response"] = response
+                return result
+
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse temporal JSON response: {response.content}")
+                return {
+                    "due_date": None,
+                    "duration_minutes": None,
+                    "confidence": 0.0,
+                    "explanation": "Failed to parse temporal response",
+                    "raw_response": response.content,
+                    "llm_response": response
+                }
+
+        except Exception as e:
+            logger.error(f"Temporal parsing failed: {e}")
+            return {
+                "due_date": None,
+                "duration_minutes": None,
+                "confidence": 0.0,
+                "explanation": f"Temporal parsing failed: {str(e)}",
                 "error": str(e)
             }
 

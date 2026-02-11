@@ -44,6 +44,8 @@ class StateProjector:
             self._apply_task_completed(state, event)
         elif event.event_type == "task_scheduled":
             self._apply_task_scheduled(state, event)
+        elif event.event_type == "task_duration_set":
+            self._apply_task_duration_set(state, event)
         elif event.event_type == "task_project_associated":
             self._apply_task_project_associated(state, event)
         elif event.event_type == "project_created":
@@ -128,6 +130,20 @@ class StateProjector:
                     pass
             elif isinstance(scheduled_for_str, datetime):
                 task.scheduled_for = scheduled_for_str
+
+    def _apply_task_duration_set(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply task_duration_set event."""
+        payload = event.payload
+        task_id = payload.get("task_id")
+        duration_minutes = payload.get("duration_minutes")
+
+        if task_id and task_id in state.tasks and duration_minutes is not None:
+            task = state.tasks[task_id]
+            try:
+                task.duration_minutes = int(duration_minutes)
+            except (ValueError, TypeError):
+                # Skip if invalid duration format
+                pass
 
     def _apply_task_project_associated(self, state: SidecarState, event: BaseEvent) -> None:
         """Apply task_project_associated event."""

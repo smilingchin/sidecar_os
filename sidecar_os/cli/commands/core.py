@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.panel import Panel
 from typing import Optional, List, Dict
 
-from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
+from sidecar_os.core.sidecar_core.events import EventStore, InboxCapturedEvent, TaskCreatedEvent, TaskCompletedEvent, TaskScheduledEvent, TaskDurationSetEvent, ProjectCreatedEvent, ProjectFocusedEvent, ProjectFocusClearedEvent, ClarificationRequestedEvent, ClarificationResolvedEvent
 from sidecar_os.core.sidecar_core.state import project_events_to_state
 from sidecar_os.core.sidecar_core.state.models import SidecarState
 from sidecar_os.core.sidecar_core.router import AdvancedPatternInterpreter, InterpreterConfig
@@ -115,6 +115,15 @@ def status() -> None:
     status_table.add_row("📥 Inbox Items", str(state.stats.inbox_count))
     status_table.add_row("🔄 Unprocessed", str(state.stats.unprocessed_inbox_count))
     status_table.add_row("✅ Active Tasks", str(state.stats.active_tasks))
+
+    # Add temporal statistics
+    overdue_tasks = state.get_overdue_tasks()
+    due_today_tasks = state.get_tasks_due_today()
+    if overdue_tasks:
+        status_table.add_row("⚠️ Overdue", f"[red]{len(overdue_tasks)}[/red]")
+    if due_today_tasks:
+        status_table.add_row("📅 Due Today", f"[yellow]{len(due_today_tasks)}[/yellow]")
+
     status_table.add_row("🏁 Completed", str(state.stats.completed_tasks))
     status_table.add_row("📂 Projects", str(state.stats.project_count))
     status_table.add_row("❓ Clarifications", str(state.stats.pending_clarifications))
@@ -210,12 +219,42 @@ def status() -> None:
 
         if active_tasks:
             def format_task(task):
-                """Format task with project prefix if available."""
+                """Format task with project prefix and temporal info if available."""
+                # Build base task description
                 if task.project_id and task.project_id in state.projects:
                     project_name = state.projects[task.project_id].name
-                    return f"• [{project_name}] {task.title} ({task.status})"
+                    base_text = f"[{project_name}] {task.title}"
                 else:
-                    return f"• {task.title} ({task.status})"
+                    base_text = task.title
+
+                # Add temporal information
+                temporal_info = []
+
+                # Add due date info
+                if task.scheduled_for:
+                    from datetime import datetime
+                    now = datetime.now(task.scheduled_for.tzinfo or None)
+                    if task.scheduled_for < now:
+                        temporal_info.append("⚠ Overdue")
+                    elif task.scheduled_for.date() == now.date():
+                        temporal_info.append("📅 Due today")
+                    else:
+                        days_diff = (task.scheduled_for.date() - now.date()).days
+                        if days_diff <= 7:
+                            temporal_info.append(f"Due {task.scheduled_for.strftime('%a')}")
+
+                # Add duration info
+                if task.duration_minutes and task.duration_minutes >= 60:
+                    hours = task.duration_minutes // 60
+                    temporal_info.append(f"{hours}h")
+                elif task.duration_minutes:
+                    temporal_info.append(f"{task.duration_minutes}m")
+
+                # Combine everything
+                if temporal_info:
+                    return f"• {base_text} ({task.status}, {', '.join(temporal_info)})"
+                else:
+                    return f"• {base_text} ({task.status})"
 
             tasks_panel = Panel(
                 "\n".join([
@@ -279,7 +318,10 @@ def task(inbox_id: str, title: Optional[str] = typer.Option(None, "--title", "-t
     console.print(f"  Event ID: {event_id[:8]}...", style="dim")
 
 
-def list_items(show_all: bool = typer.Option(False, "--all", "-a", help="Show all items including completed")) -> None:
+def list_items(
+    show_all: bool = typer.Option(False, "--all", "-a", help="Show all items including completed"),
+    due_today: bool = typer.Option(False, "--due-today", help="Show tasks due today")
+) -> None:
     """List inbox items and tasks."""
     # Load events and project state
     store = EventStore()
@@ -310,15 +352,32 @@ def list_items(show_all: bool = typer.Option(False, "--all", "-a", help="Show al
 
     # Show active tasks
     active_tasks = state.get_active_tasks()
+
+    # Filter for due today if requested
+    if due_today:
+        active_tasks = state.get_tasks_due_today()
+        table_title = "📅 Tasks Due Today"
+    else:
+        table_title = "✅ Active Tasks"
+
     if active_tasks:
-        tasks_table = Table(title="✅ Active Tasks", show_header=True, header_style="bold green")
+        tasks_table = Table(title=table_title, show_header=True, header_style="bold green")
         tasks_table.add_column("Task ID", style="cyan", width=12)
         tasks_table.add_column("Title", style="white")
         tasks_table.add_column("Status", justify="center", width=10)
-        tasks_table.add_column("Priority", justify="center", width=10)
-        tasks_table.add_column("Created", style="dim", width=16)
+        tasks_table.add_column("Due Date", style="yellow", width=12)
+        tasks_table.add_column("Duration", style="magenta", width=8)
+        tasks_table.add_column("Priority", justify="center", width=8)
+        tasks_table.add_column("Created", style="dim", width=12)
 
-        for task in sorted(active_tasks, key=lambda x: x.created_at, reverse=True):
+        # Sort tasks by due date (overdue first, then by proximity)
+        if not due_today:  # Only sort by due date if not filtering for today
+            active_tasks = state.get_tasks_sorted_by_due_date()
+        else:
+            # For due today, sort by due date time
+            active_tasks = sorted(active_tasks, key=lambda x: x.scheduled_for or x.created_at)
+
+        for task in active_tasks:
             status_style = "yellow" if task.status == "in_progress" else "white"
 
             # Format title with project prefix if available
@@ -328,10 +387,46 @@ def list_items(show_all: bool = typer.Option(False, "--all", "-a", help="Show al
             else:
                 formatted_title = task.title
 
+            # Format due date with overdue styling
+            if task.scheduled_for:
+                from datetime import datetime
+                now = datetime.now(task.scheduled_for.tzinfo or None)
+                is_overdue = task.scheduled_for < now
+
+                if is_overdue:
+                    due_date_text = f"[red bold]⚠ {task.scheduled_for.strftime('%m-%d')}[/red bold]"
+                elif task.scheduled_for.date() == now.date():
+                    due_date_text = f"[yellow bold]📅 Today[/yellow bold]"
+                else:
+                    # Show day of week for dates within a week
+                    days_diff = (task.scheduled_for.date() - now.date()).days
+                    if days_diff <= 7:
+                        due_date_text = f"[green]{task.scheduled_for.strftime('%a %m-%d')}[/green]"
+                    else:
+                        due_date_text = f"{task.scheduled_for.strftime('%m-%d')}"
+            else:
+                due_date_text = "[dim]--[/dim]"
+
+            # Format duration
+            if task.duration_minutes:
+                if task.duration_minutes >= 60:
+                    hours = task.duration_minutes // 60
+                    minutes = task.duration_minutes % 60
+                    if minutes == 0:
+                        duration_text = f"{hours}h"
+                    else:
+                        duration_text = f"{hours}h{minutes}m"
+                else:
+                    duration_text = f"{task.duration_minutes}m"
+            else:
+                duration_text = "[dim]--[/dim]"
+
             tasks_table.add_row(
                 task.task_id,
                 formatted_title,
                 f"[{status_style}]{task.status}[/{status_style}]",
+                due_date_text,
+                duration_text,
                 task.priority or "normal",
                 task.created_at.strftime("%m-%d %H:%M")
             )
