@@ -1210,6 +1210,144 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
     # Advanced natural language query processing using LLM
     else:
         console.print("🧠 Processing your question with AI...", style="dim cyan")
+
+        # Check if this is an analytical/summary request
+        analytical_keywords = ['summary', 'developments', 'progress', 'overview', 'what happened', 'status update', 'brief me', 'catch up']
+        is_analytical_query = any(keyword in question_lower for keyword in analytical_keywords)
+
+        if is_analytical_query:
+            # Handle analytical queries with project summary generation
+            try:
+                llm_service = LLMService()
+
+                # Extract project name from the question
+                project_keywords = []
+                words = question_lower.replace('?', '').split()
+
+                # Look for potential project names (2+ letter words, capitalized in original)
+                original_words = question.split()
+                for i, word in enumerate(original_words):
+                    if len(word) > 1 and (word.isupper() or word[0].isupper()):
+                        project_keywords.append(word.lower())
+
+                # Find matching project
+                target_project = None
+                for project in state.projects.values():
+                    project_name_lower = project.name.lower()
+                    project_aliases_lower = [alias.lower() for alias in project.aliases]
+
+                    # Check if any project keywords match the project name or aliases
+                    if any(keyword in project_name_lower or
+                          any(keyword in alias for alias in project_aliases_lower)
+                          for keyword in project_keywords):
+                        target_project = project
+                        break
+
+                if target_project:
+                    console.print(f"📊 Analyzing {target_project.name} project developments...", style="dim green")
+
+                    # Gather all project data
+                    project_tasks = [t for t in state.get_active_tasks() + state.get_completed_tasks()
+                                   if t.project_id == target_project.project_id]
+                    project_artifacts = [a for a in state.artifacts.values()
+                                       if a.project_id == target_project.project_id or
+                                          any(t.task_id == a.task_id for t in project_tasks)]
+
+                    if not project_tasks and not project_artifacts:
+                        console.print(f"📭 No tasks or artifacts found for {target_project.name} project", style="yellow")
+                        return
+
+                    # Create timeline summary
+                    console.print(f"📈 {target_project.name} Project Summary:", style="bold blue")
+                    console.print()
+
+                    # Task summary
+                    active_tasks = [t for t in project_tasks if t.status != 'completed']
+                    completed_tasks = [t for t in project_tasks if t.status == 'completed']
+
+                    console.print("🔢 Task Overview:", style="bold")
+                    console.print(f"  • Total tasks: {len(project_tasks)}", style="dim")
+                    console.print(f"  • Completed: {len(completed_tasks)}", style="green")
+                    console.print(f"  • Active: {len(active_tasks)}", style="yellow")
+                    console.print()
+
+                    # Recent completions
+                    if completed_tasks:
+                        console.print("✅ Recent Completions:", style="bold green")
+                        for task in sorted(completed_tasks, key=lambda t: t.completed_at or t.created_at, reverse=True)[:5]:
+                            time_str = task.completed_at.strftime("%m-%d %H:%M") if task.completed_at else "unknown"
+                            console.print(f"  • {task.title} (completed {time_str})", style="dim green")
+                        console.print()
+
+                    # Active work
+                    if active_tasks:
+                        console.print("🔄 Active Work:", style="bold yellow")
+                        for task in active_tasks[:5]:
+                            status_icon = "🟡" if task.status == "in_progress" else "⚪"
+                            due_str = f" (due {task.scheduled_for.strftime('%m-%d')})" if task.scheduled_for else ""
+                            console.print(f"  {status_icon} {task.title}{due_str}", style="dim yellow")
+                        console.print()
+
+                    # Artifacts and communications
+                    if project_artifacts:
+                        console.print("📎 Recent Activity & Artifacts:", style="bold cyan")
+                        for artifact in sorted(project_artifacts, key=lambda a: a.created_at, reverse=True)[:5]:
+                            artifact_icon = "📎" if artifact.artifact_type == 'doc' else "📧" if artifact.artifact_type == 'email' else "💬"
+                            time_str = artifact.created_at.strftime("%m-%d %H:%M")
+                            console.print(f"  {artifact_icon} {artifact.title} ({time_str})", style="dim cyan")
+                        console.print()
+
+                    # Generate AI summary if we have enough data
+                    if len(project_tasks) > 2 or len(project_artifacts) > 1:
+                        console.print("🧠 AI Analysis:", style="bold blue")
+
+                        # Prepare data for AI summary
+                        summary_data = []
+                        for task in project_tasks[-10:]:  # Recent 10 tasks
+                            summary_data.append({
+                                'type': 'task',
+                                'title': task.title,
+                                'status': task.status,
+                                'created_at': task.created_at.isoformat() if task.created_at else None,
+                                'completed_at': task.completed_at.isoformat() if task.completed_at else None,
+                                'priority': task.priority
+                            })
+
+                        for artifact in project_artifacts[-5:]:  # Recent 5 artifacts
+                            summary_data.append({
+                                'type': 'artifact',
+                                'title': artifact.title,
+                                'artifact_type': artifact.artifact_type,
+                                'created_at': artifact.created_at.isoformat(),
+                                'content_preview': (artifact.content or '')[:200] if artifact.content else None
+                            })
+
+                        # Generate AI summary
+                        def run_async_summary():
+                            import asyncio
+                            return asyncio.run(llm_service.summarize_events(
+                                summary_data,
+                                time_period="project",
+                                style="executive"
+                            ))
+
+                        summary_result = run_async_summary()
+                        console.print(summary_result.get('summary', 'Unable to generate summary'), style="dim")
+
+                else:
+                    console.print("❓ Could not identify specific project from your question", style="yellow")
+                    console.print("💡 Try asking about specific projects like:", style="dim")
+                    for project in list(state.projects.values())[:3]:
+                        console.print(f"   'Give me a summary of {project.name} developments'", style="dim")
+
+                return
+
+            except Exception as e:
+                console.print(f"⚠️ Project summary failed: {str(e)}", style="yellow")
+                console.print("💡 Try asking simpler questions about specific tasks or projects", style="dim")
+                return
+
+        # Regular query processing for non-analytical questions
         try:
             llm_service = LLMService()
 
