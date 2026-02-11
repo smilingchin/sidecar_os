@@ -178,8 +178,16 @@ class SidecarState(BaseModel):
         now = datetime.now(UTC)
         return [
             task for task in self.get_active_tasks()
-            if task.scheduled_for and task.scheduled_for < now
+            if task.scheduled_for and self._normalize_datetime_for_comparison(task.scheduled_for) < now
         ]
+
+    def _normalize_datetime_for_comparison(self, dt: datetime) -> datetime:
+        """Normalize datetime for timezone-aware comparison."""
+        from datetime import UTC
+        if dt.tzinfo is None:
+            # If naive, assume local timezone and convert to UTC
+            return dt.replace(tzinfo=UTC)
+        return dt
 
     def get_tasks_sorted_by_due_date(self) -> List[Task]:
         """Get active tasks sorted by due date (overdue first, then by proximity)."""
@@ -189,8 +197,9 @@ class SidecarState(BaseModel):
         def sort_key(task: Task):
             if not task.scheduled_for:
                 return (2, datetime.max.replace(tzinfo=UTC))  # No due date goes to end
-            overdue = task.scheduled_for < now
-            return (0 if overdue else 1, task.scheduled_for)
+            normalized_due = self._normalize_datetime_for_comparison(task.scheduled_for)
+            overdue = normalized_due < now
+            return (0 if overdue else 1, normalized_due)
 
         return sorted(self.get_active_tasks(), key=sort_key)
 

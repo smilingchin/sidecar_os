@@ -708,6 +708,258 @@ Be flexible with project matching - match by name, aliases, or similar keywords.
                 "error": str(e)
             }
 
+    async def parse_mixed_content(
+        self,
+        text: str,
+        current_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Parse natural language input that may contain tasks, artifacts, and relationships.
+
+        This is the core Phase 7 functionality that enables intelligent extraction of
+        both tasks and artifacts from complex natural language input.
+
+        Args:
+            text: Natural language input that may contain mixed content
+            current_context: Optional context including current projects, tasks, etc.
+
+        Returns:
+            Dictionary with parsed tasks, artifacts, relationships, and metadata
+        """
+        from datetime import datetime, UTC
+
+        current_date = datetime.now(UTC)
+
+        # Prepare context information for better parsing
+        context_info = ""
+        if current_context:
+            projects = current_context.get('projects', {})
+            if projects:
+                project_names = list(projects.keys())[:10]  # Limit to prevent token overflow
+                context_info += f"\nActive projects: {', '.join(project_names)}"
+
+            tasks = current_context.get('tasks', {})
+            if tasks:
+                active_tasks = [task for task in tasks.values() if task.get('status') != 'completed'][:10]
+                if active_tasks:
+                    task_summaries = [f"'{task.get('title', '')[:30]}...'" for task in active_tasks]
+                    context_info += f"\nActive tasks: {', '.join(task_summaries)}"
+
+        system_prompt = f"""You are an intelligent content parser that extracts tasks, artifacts, and their relationships from natural language input.
+
+Current context:
+- Today's date: {current_date.strftime('%A, %B %d, %Y')} ({current_date.date().isoformat()})
+- Current time: {current_date.strftime('%I:%M %p')}{context_info}
+
+Your task is to analyze natural language input and identify:
+
+1. **Tasks** - Actionable items, follow-ups, TODOs, work items
+2. **Artifacts** - External references like emails, Slack messages, documents, meeting notes, calls
+3. **Relationships** - How tasks and artifacts relate to each other
+4. **Project associations** - Which projects this content relates to
+
+Types of artifacts to detect:
+- **slack_msg**: Slack messages, DMs, channel posts (look for "slack", "sent message", "DM")
+- **email**: Email content, correspondence (look for "email", "sent to", "received from")
+- **doc**: Documents, files, links to SharePoint/Google Drive/etc (look for URLs, "document", "shared doc")
+- **meeting_notes**: Meeting summaries, standup notes (look for "meeting", "discussed", "standup")
+- **call_notes**: Phone calls, video calls (look for "call", "spoke with", "discussed on call")
+- **quip**: Quip documents (look for quip.com URLs)
+- **sharepoint**: SharePoint documents (look for sharepoint.com URLs)
+- **gdrive**: Google Drive files (look for drive.google.com URLs)
+
+Examples of mixed content:
+- "Sent CA ZAP slack message to Abhi: 'Progress update...' - need to follow up by Friday"
+  → Task: "Follow up with Abhi by Friday", Artifact: Slack message with content
+- "Got approval email from legal team - can proceed with migration"
+  → Task: "Proceed with migration", Artifact: Email from legal team
+- "Meeting notes from team standup: discussed blockers and next steps"
+  → Artifact: Meeting notes, possibly Task: address discussed items
+
+Return JSON with this exact structure:
+{{
+    "tasks": [
+        {{
+            "title": "Clear, actionable task title",
+            "description": "Optional detailed description",
+            "priority": "high|normal|low|urgent|null",
+            "status": "pending|in_progress|completed|null",
+            "due_date": "ISO_FORMAT or 'tomorrow'|'friday'|null",
+            "duration_minutes": integer_or_null,
+            "project_hints": ["keyword1", "keyword2"],
+            "confidence": 0.9
+        }}
+    ],
+    "artifacts": [
+        {{
+            "artifact_type": "slack_msg|email|doc|meeting_notes|call_notes|quip|sharepoint|gdrive",
+            "title": "Human-readable title for the artifact",
+            "content": "Full embedded content if present, null otherwise",
+            "url": "Extracted URL if present, null otherwise",
+            "source": "Source identifier like 'slack:channel.timestamp'",
+            "project_hints": ["keyword1", "keyword2"],
+            "task_hints": ["relates to task by..."],
+            "metadata": {{"participants": ["person1"], "channel": "name"}},
+            "confidence": 0.8
+        }}
+    ],
+    "relationships": [
+        {{
+            "relationship_type": "task_artifact_link",
+            "task_index": 0,
+            "artifact_index": 0,
+            "description": "Artifact supports/relates to task",
+            "confidence": 0.9
+        }}
+    ],
+    "overall_confidence": 0.85,
+    "explanation": "Clear explanation of what was parsed and why",
+    "project_suggestions": ["project1", "project2"],
+    "parsing_method": "mixed_content_llm"
+}}
+
+Guidelines:
+- Be conservative with confidence scores (>0.8 only when very certain)
+- Extract full content when explicitly provided (e.g. "sent this email: [content]")
+- Generate descriptive titles for artifacts
+- Use project_hints to suggest associations (e.g. "CA ZAP", "lpd", "q1-planning")
+- Create relationships when tasks and artifacts clearly relate
+- If input is just a task or just an artifact, still return the full structure
+- Use null for optional fields when not applicable
+
+Focus on being intelligent about context - if someone mentions "sent slack message about project X", that's likely both an artifact (the message) and possibly a task (follow up)."""
+
+        prompt = f"""Parse this mixed content input: "{text}"
+
+Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
+
+        try:
+            response = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.1,  # Low temperature for consistent parsing
+                max_tokens=1500   # Allow for complex responses
+            )
+
+            # Parse JSON response
+            try:
+                content = response.content.strip()
+
+                # Remove markdown code block formatting if present
+                if content.startswith('```json'):
+                    content = content[7:]  # Remove ```json
+                if content.endswith('```'):
+                    content = content[:-3]  # Remove ```
+                content = content.strip()
+
+                result = json.loads(content)
+
+                # Validate and clean up the result
+                self._validate_parsed_content(result)
+
+                result["llm_response"] = response
+                return result
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse mixed content JSON response: {response.content}")
+                return {
+                    "tasks": [],
+                    "artifacts": [],
+                    "relationships": [],
+                    "overall_confidence": 0.0,
+                    "explanation": f"Failed to parse LLM JSON response: {str(e)}",
+                    "project_suggestions": [],
+                    "parsing_method": "mixed_content_llm",
+                    "error": "JSON parsing failed",
+                    "raw_response": response.content
+                }
+
+        except Exception as e:
+            logger.error(f"Mixed content parsing failed: {e}")
+            return {
+                "tasks": [],
+                "artifacts": [],
+                "relationships": [],
+                "overall_confidence": 0.0,
+                "explanation": f"Mixed content parsing failed: {str(e)}",
+                "project_suggestions": [],
+                "parsing_method": "mixed_content_llm",
+                "error": str(e)
+            }
+
+    def _validate_parsed_content(self, result: Dict[str, Any]) -> None:
+        """Validate and clean up parsed content result."""
+        # Ensure required fields exist
+        result.setdefault("tasks", [])
+        result.setdefault("artifacts", [])
+        result.setdefault("relationships", [])
+        result.setdefault("overall_confidence", 0.5)
+        result.setdefault("explanation", "No explanation provided")
+        result.setdefault("project_suggestions", [])
+        result.setdefault("parsing_method", "mixed_content_llm")
+
+        # Validate confidence scores
+        if not isinstance(result["overall_confidence"], (int, float)):
+            result["overall_confidence"] = 0.5
+        result["overall_confidence"] = max(0.0, min(1.0, float(result["overall_confidence"])))
+
+        # Validate tasks
+        for task in result["tasks"]:
+            if not isinstance(task.get("confidence", 0), (int, float)):
+                task["confidence"] = 0.5
+            task["confidence"] = max(0.0, min(1.0, float(task.get("confidence", 0.5))))
+
+            # Ensure required fields
+            task.setdefault("title", "Untitled task")
+            task.setdefault("project_hints", [])
+
+            # Validate priority and status
+            valid_priorities = ["high", "normal", "low", "urgent", None]
+            if task.get("priority") not in valid_priorities:
+                task["priority"] = None
+
+            valid_statuses = ["pending", "in_progress", "completed", "cancelled", "on_hold", None]
+            if task.get("status") not in valid_statuses:
+                task["status"] = None
+
+        # Validate artifacts
+        for artifact in result["artifacts"]:
+            if not isinstance(artifact.get("confidence", 0), (int, float)):
+                artifact["confidence"] = 0.5
+            artifact["confidence"] = max(0.0, min(1.0, float(artifact.get("confidence", 0.5))))
+
+            # Ensure required fields
+            artifact.setdefault("title", "Untitled artifact")
+            artifact.setdefault("artifact_type", "doc")  # Default fallback
+            artifact.setdefault("project_hints", [])
+            artifact.setdefault("task_hints", [])
+            artifact.setdefault("metadata", {})
+
+        # Validate relationships
+        for relationship in result["relationships"]:
+            if not isinstance(relationship.get("confidence", 0), (int, float)):
+                relationship["confidence"] = 0.5
+            relationship["confidence"] = max(0.0, min(1.0, float(relationship.get("confidence", 0.5))))
+
+            # Ensure indices are valid
+            task_index = relationship.get("task_index", -1)
+            artifact_index = relationship.get("artifact_index", -1)
+
+            if (not isinstance(task_index, int) or task_index < 0 or
+                task_index >= len(result["tasks"]) or
+                not isinstance(artifact_index, int) or artifact_index < 0 or
+                artifact_index >= len(result["artifacts"])):
+                # Invalid relationship, mark for removal
+                relationship["_invalid"] = True
+            else:
+                relationship.setdefault("relationship_type", "task_artifact_link")
+                relationship.setdefault("description", "Related items")
+
+        # Remove invalid relationships
+        result["relationships"] = [
+            rel for rel in result["relationships"]
+            if not rel.get("_invalid", False)
+        ]
+
     def get_status(self) -> Dict[str, Any]:
         """Get service status and statistics."""
         return {
