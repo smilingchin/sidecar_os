@@ -667,9 +667,135 @@ def update() -> None:
     console.print("Update functionality - placeholder", style="dim")
 
 
-def ask() -> None:
-    """Ask natural language questions."""
-    console.print("Ask functionality - placeholder", style="dim")
+def ask(question: str = typer.Argument(..., help="Natural language question about your tasks and projects")) -> None:
+    """Ask natural language questions about your tasks, projects, and productivity."""
+    # Load current state
+    store = EventStore()
+    artifact_store = ArtifactStore()
+    events = store.read_all()
+    artifact_events = artifact_store.read_all_artifact_events()
+    state = project_events_to_state(events, artifact_events)
+
+    # Basic question analysis and response
+    question_lower = question.lower()
+
+    console.print(f"🤔 Question: {question}", style="bold cyan")
+    console.print()
+
+    # Day summary questions
+    if any(phrase in question_lower for phrase in ["how is my day", "how's my day", "day today", "today going"]):
+        console.print("📅 Your Day Today:", style="bold blue")
+
+        # Today's tasks due
+        due_today = state.get_tasks_due_today()
+        if due_today:
+            console.print(f"• {len(due_today)} tasks due today", style="yellow")
+            for task in due_today[:3]:  # Show first 3
+                status_icon = "🟡" if task.status == "in_progress" else "⚪"
+                console.print(f"  {status_icon} {task.title}", style="dim")
+            if len(due_today) > 3:
+                console.print(f"  ... and {len(due_today) - 3} more", style="dim")
+        else:
+            console.print("• No tasks due today", style="green")
+
+        # Overdue items
+        overdue = state.get_overdue_tasks()
+        if overdue:
+            console.print(f"• {len(overdue)} overdue tasks", style="red")
+
+        # Recent activity
+        unprocessed = state.get_unprocessed_inbox()
+        if unprocessed:
+            console.print(f"• {len(unprocessed)} unprocessed inbox items", style="blue")
+
+        # Current focus
+        if state.current_focus_project:
+            project_name = state.projects.get(state.current_focus_project, {}).name if hasattr(state.projects.get(state.current_focus_project, {}), 'name') else state.current_focus_project
+            console.print(f"• Currently focused on: {project_name}", style="green")
+
+    # Task-related questions
+    elif any(phrase in question_lower for phrase in ["how many tasks", "task count", "tasks do i have"]):
+        active_tasks = state.get_active_tasks()
+        completed_tasks = state.get_completed_tasks()
+
+        console.print("📋 Task Summary:", style="bold blue")
+        console.print(f"• Active tasks: {len(active_tasks)}", style="yellow")
+        console.print(f"• Completed tasks: {len(completed_tasks)}", style="green")
+
+        # Break down by status
+        in_progress = [t for t in active_tasks if t.status == "in_progress"]
+        pending = [t for t in active_tasks if t.status == "pending"]
+
+        if in_progress:
+            console.print(f"• In progress: {len(in_progress)}", style="blue")
+        if pending:
+            console.print(f"• Pending: {len(pending)}", style="dim")
+
+    # Project questions
+    elif any(phrase in question_lower for phrase in ["projects", "what projects", "project status"]):
+        console.print("📂 Project Overview:", style="bold blue")
+        console.print(f"• Total projects: {len(state.projects)}", style="cyan")
+
+        if state.current_focus_project and state.current_focus_project in state.projects:
+            project = state.projects[state.current_focus_project]
+            console.print(f"• Current focus: {project.name}", style="green")
+
+            # Tasks for focused project
+            project_tasks = [t for t in state.get_active_tasks() if t.project_id == state.current_focus_project]
+            if project_tasks:
+                console.print(f"  - {len(project_tasks)} active tasks", style="dim")
+
+        # List recent projects
+        recent_projects = list(state.projects.values())[:5]
+        if recent_projects:
+            console.print("• Recent projects:", style="dim")
+            for project in recent_projects:
+                console.print(f"  - {project.name}", style="dim")
+
+    # Productivity questions
+    elif any(phrase in question_lower for phrase in ["productive", "progress", "accomplishment"]):
+        completed_today = [t for t in state.get_completed_tasks()
+                          if t.completed_at and t.completed_at.date() == datetime.now().date()]
+
+        console.print("🚀 Productivity Today:", style="bold blue")
+        if completed_today:
+            console.print(f"• {len(completed_today)} tasks completed today!", style="green")
+            for task in completed_today[:3]:
+                console.print(f"  ✅ {task.title}", style="dim green")
+        else:
+            console.print("• No tasks completed yet today", style="yellow")
+
+        # Show what's in progress
+        in_progress = [t for t in state.get_active_tasks() if t.status == "in_progress"]
+        if in_progress:
+            console.print(f"• {len(in_progress)} tasks currently in progress:", style="blue")
+            for task in in_progress[:3]:
+                console.print(f"  🟡 {task.title}", style="dim")
+
+    # Artifact questions
+    elif any(phrase in question_lower for phrase in ["artifact", "document", "message", "email"]):
+        console.print("📎 Artifacts Overview:", style="bold blue")
+        console.print(f"• Total artifacts: {len(state.artifacts)}", style="cyan")
+
+        # Group by type
+        by_type = {}
+        for artifact in state.artifacts.values():
+            if not artifact.archived_at:
+                by_type[artifact.artifact_type] = by_type.get(artifact.artifact_type, 0) + 1
+
+        for artifact_type, count in by_type.items():
+            console.print(f"• {artifact_type}: {count}", style="dim")
+
+    # Generic fallback
+    else:
+        console.print("🤖 I can help you with questions about:", style="bold blue")
+        console.print("• Your day: 'How is my day today?'", style="dim")
+        console.print("• Tasks: 'How many tasks do I have?'", style="dim")
+        console.print("• Projects: 'What projects am I working on?'", style="dim")
+        console.print("• Productivity: 'How productive have I been?'", style="dim")
+        console.print("• Artifacts: 'What documents do I have?'", style="dim")
+        console.print()
+        console.print(f"💡 For more advanced questions, try: ss add \"Research: {question}\"", style="dim")
 
 
 def focus() -> None:
