@@ -837,7 +837,7 @@ Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.1,  # Low temperature for consistent parsing
-                max_tokens=2500   # Increased for very long content
+                max_tokens=5000   # Generous limit for comprehensive parsing of long content
             )
 
             # Parse JSON response

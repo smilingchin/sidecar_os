@@ -728,6 +728,12 @@ def update(
                 if overall_confidence > 0.7:
                     console.print(f"✨ Parsed with {overall_confidence:.0%} confidence", style="dim green")
 
+                    # Show parsed content summary
+                    parsed_tasks = parsed_content.get('tasks', [])
+                    parsed_artifacts = parsed_content.get('artifacts', [])
+                    if parsed_tasks or parsed_artifacts:
+                        console.print(f"📋 Parsed: {len(parsed_tasks)} tasks, {len(parsed_artifacts)} artifacts", style="dim")
+
                     best_match = None
 
                     # Handle task updates from parsed content
@@ -757,6 +763,7 @@ def update(
                             console.print(f"🎯 Matched task: {best_match.title} ({best_match.task_id[:8]}...)", style="green")
                             console.print(f"   Using project/task hints: {', '.join(search_terms[:3])}", style="dim")
 
+
                             # Apply status update if detected
                             if task_data.get('status') and best_match.status != task_data['status']:
                                 if task_data['status'] == "completed":
@@ -777,8 +784,16 @@ def update(
                                 store.append(event)
                                 console.print(f"✅ Task {best_match.task_id[:8]}... marked as {task_data['status']}", style="green")
                                 console.print(f"   Method: Mixed content AI parsing", style="dim")
+                            else:
+                                # Explain why status wasn't updated
+                                if not task_data.get('status'):
+                                    console.print("ℹ️ No status change detected in content", style="dim yellow")
+                                elif best_match.status == task_data['status']:
+                                    console.print(f"ℹ️ Task already has status '{task_data['status']}'", style="dim yellow")
                         else:
                             console.print("⚠️ No matching task found for update", style="yellow")
+                    else:
+                        console.print("ℹ️ No task updates found in content", style="dim yellow")
 
                     # Handle artifact creation from parsed content
                     if parsed_content.get('artifacts') and len(parsed_content['artifacts']) > 0:
@@ -859,7 +874,8 @@ def update(
             words = request_lower.split()
             significant_words = [w for w in words if len(w) > 2 and w not in ['the', 'and', 'for', 'with', 'this', 'that', 'from', 'have', 'been', 'will', 'can', 'should']]
 
-            console.print(f"🔍 Searching with keywords: {', '.join(significant_words[:5])}", style="dim")
+            if len(significant_words) > 0:
+                console.print(f"🔍 Searching with keywords: {', '.join(significant_words[:5])}", style="dim")
 
             for task in all_tasks:
                 task_text = f"{task.title} {task.description or ''} {task.project_id or ''}".lower()
@@ -870,8 +886,6 @@ def update(
 
             # Sort by match score
             matching_tasks.sort(key=lambda x: x[1], reverse=True)
-
-            console.print(f"📊 Found {len(matching_tasks)} potential matches", style="dim")
 
             if not matching_tasks:
                 console.print("❌ No matching tasks found in simple keyword search", style="red")
