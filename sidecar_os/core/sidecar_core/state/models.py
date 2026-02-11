@@ -1,7 +1,7 @@
 """State models for Sidecar OS."""
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -72,6 +72,23 @@ class SystemStats(BaseModel):
     last_activity: Optional[datetime] = None
 
 
+class Artifact(BaseModel):
+    """External artifact reference with project/task linkage."""
+
+    artifact_id: str
+    artifact_type: str                    # slack_msg, email, doc, gdrive, etc.
+    title: str
+    content: Optional[str] = None         # Full text content
+    url: Optional[str] = None             # External link
+    source: str                           # Source identifier
+    created_at: datetime
+    created_by: Optional[str] = None
+    task_id: Optional[str] = None         # Associated task
+    project_id: Optional[str] = None      # Associated project
+    archived_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class SidecarState(BaseModel):
     """Complete derived state of the Sidecar OS system."""
 
@@ -79,6 +96,7 @@ class SidecarState(BaseModel):
     tasks: Dict[str, Task] = Field(default_factory=dict)
     projects: Dict[str, Project] = Field(default_factory=dict)
     clarifications: Dict[str, ClarificationRequest] = Field(default_factory=dict)
+    artifacts: Dict[str, Artifact] = Field(default_factory=dict)
     current_focus_project: Optional[str] = None
     stats: SystemStats = Field(default_factory=SystemStats)
     last_event_processed: Optional[str] = None
@@ -175,3 +193,18 @@ class SidecarState(BaseModel):
             return (0 if overdue else 1, task.scheduled_for)
 
         return sorted(self.get_active_tasks(), key=sort_key)
+
+    def get_artifacts_for_task(self, task_id: str) -> List[Artifact]:
+        """Get all active artifacts linked to a task."""
+        return [a for a in self.artifacts.values()
+                if a.task_id == task_id and not a.archived_at]
+
+    def get_artifacts_for_project(self, project_id: str) -> List[Artifact]:
+        """Get all active artifacts linked to a project."""
+        return [a for a in self.artifacts.values()
+                if a.project_id == project_id and not a.archived_at]
+
+    def get_artifacts_by_type(self, artifact_type: str) -> List[Artifact]:
+        """Get all artifacts of specific type."""
+        return [a for a in self.artifacts.values()
+                if a.artifact_type == artifact_type and not a.archived_at]

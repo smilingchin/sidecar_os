@@ -1,28 +1,35 @@
 """State projection logic for replaying events."""
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from ..events import BaseEvent
-from .models import SidecarState, InboxItem, Task, Project, ClarificationRequest, SystemStats
+from .models import SidecarState, InboxItem, Task, Project, ClarificationRequest, SystemStats, Artifact
 
 
 class StateProjector:
     """Projects events into current system state."""
 
-    def project_state(self, events: List[BaseEvent]) -> SidecarState:
+    def project_state(self, events: List[BaseEvent], artifact_events: Optional[List[BaseEvent]] = None) -> SidecarState:
         """Project a list of events into the current state.
 
         Args:
             events: List of events in chronological order
+            artifact_events: Optional list of artifact events
 
         Returns:
             Current derived state
         """
         state = SidecarState()
 
+        # Project main events (tasks, projects, etc.)
         for event in events:
             self._apply_event(state, event)
+
+        # Project artifact events if provided
+        if artifact_events:
+            for event in artifact_events:
+                self._apply_artifact_event(state, event)
 
         # Update final statistics
         self._update_stats(state)
@@ -241,6 +248,70 @@ class StateProjector:
         if request_id in state.clarifications:
             state.clarifications[request_id].resolved = True
 
+    def _apply_artifact_event(self, state: SidecarState, event: BaseEvent) -> None:
+        """Route artifact events to appropriate handlers."""
+        if event.event_type == "artifact_registered":
+            self._apply_artifact_registered(state, event)
+        elif event.event_type == "artifact_linked":
+            self._apply_artifact_linked(state, event)
+        elif event.event_type == "artifact_unlinked":
+            self._apply_artifact_unlinked(state, event)
+        elif event.event_type == "artifact_archived":
+            self._apply_artifact_archived(state, event)
+
+    def _apply_artifact_registered(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply artifact_registered event."""
+        payload = event.payload
+        artifact = Artifact(
+            artifact_id=payload.get("artifact_id", event.event_id),
+            artifact_type=payload.get("artifact_type"),
+            title=payload.get("title", ""),
+            content=payload.get("content"),
+            url=payload.get("url"),
+            source=payload.get("source"),
+            created_at=event.timestamp,
+            created_by=payload.get("created_by"),
+            task_id=payload.get("task_id"),
+            project_id=payload.get("project_id"),
+            metadata=payload.get("metadata", {})
+        )
+        state.artifacts[artifact.artifact_id] = artifact
+
+    def _apply_artifact_linked(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply artifact_linked event."""
+        payload = event.payload
+        artifact_id = payload.get("artifact_id")
+        task_id = payload.get("task_id")
+        project_id = payload.get("project_id")
+
+        if artifact_id and artifact_id in state.artifacts:
+            if task_id:
+                state.artifacts[artifact_id].task_id = task_id
+            if project_id:
+                state.artifacts[artifact_id].project_id = project_id
+
+    def _apply_artifact_unlinked(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply artifact_unlinked event."""
+        payload = event.payload
+        artifact_id = payload.get("artifact_id")
+        task_id = payload.get("task_id")
+        project_id = payload.get("project_id")
+
+        if artifact_id and artifact_id in state.artifacts:
+            artifact = state.artifacts[artifact_id]
+            if task_id and artifact.task_id == task_id:
+                artifact.task_id = None
+            if project_id and artifact.project_id == project_id:
+                artifact.project_id = None
+
+    def _apply_artifact_archived(self, state: SidecarState, event: BaseEvent) -> None:
+        """Apply artifact_archived event."""
+        payload = event.payload
+        artifact_id = payload.get("artifact_id")
+
+        if artifact_id and artifact_id in state.artifacts:
+            state.artifacts[artifact_id].archived_at = event.timestamp
+
     def _update_stats(self, state: SidecarState) -> None:
         """Update derived statistics in the state.
 
@@ -273,14 +344,15 @@ class StateProjector:
         state.stats = stats
 
 
-def project_events_to_state(events: List[BaseEvent]) -> SidecarState:
+def project_events_to_state(events: List[BaseEvent], artifact_events: Optional[List[BaseEvent]] = None) -> SidecarState:
     """Convenience function to project events to state.
 
     Args:
         events: List of events to project
+        artifact_events: Optional list of artifact events
 
     Returns:
         Derived state
     """
     projector = StateProjector()
-    return projector.project_state(events)
+    return projector.project_state(events, artifact_events)

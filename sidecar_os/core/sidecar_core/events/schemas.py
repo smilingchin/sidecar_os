@@ -101,6 +101,30 @@ class ClarificationResolvedEvent(BaseEvent):
     event_type: Literal["clarification_resolved"] = "clarification_resolved"
 
 
+class ArtifactRegisteredEvent(BaseEvent):
+    """Event for registering an external artifact reference."""
+
+    event_type: Literal["artifact_registered"] = "artifact_registered"
+
+
+class ArtifactLinkedEvent(BaseEvent):
+    """Event for linking existing artifact to task/project."""
+
+    event_type: Literal["artifact_linked"] = "artifact_linked"
+
+
+class ArtifactUnlinkedEvent(BaseEvent):
+    """Event for removing artifact link."""
+
+    event_type: Literal["artifact_unlinked"] = "artifact_unlinked"
+
+
+class ArtifactArchivedEvent(BaseEvent):
+    """Event for archiving an artifact (soft delete)."""
+
+    event_type: Literal["artifact_archived"] = "artifact_archived"
+
+
 # Type alias for all event types
 Event = (
     InboxCapturedEvent |
@@ -115,5 +139,9 @@ Event = (
     ProjectFocusedEvent |
     ProjectFocusClearedEvent |
     ClarificationRequestedEvent |
-    ClarificationResolvedEvent
+    ClarificationResolvedEvent |
+    ArtifactRegisteredEvent |
+    ArtifactLinkedEvent |
+    ArtifactUnlinkedEvent |
+    ArtifactArchivedEvent
 )
