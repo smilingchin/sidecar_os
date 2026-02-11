@@ -1073,11 +1073,30 @@ def update(
                             console.print(f"✅ Priority updated to: {updates['priority']}", style="green")
                             updated_something = True
 
-                        # Due date updates (if supported)
+                        # Due date updates
                         if updates.get('due_date'):
-                            # Could add due date update events here
-                            console.print(f"📅 Due date update detected: {updates['due_date']}", style="cyan")
-                            console.print("   (Due date updates not yet implemented)", style="dim")
+                            try:
+                                from datetime import datetime
+                                due_date_str = updates['due_date']
+
+                                # Try to parse as ISO date directly
+                                parsed_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+
+                                # Create TaskScheduledEvent
+                                scheduled_event = TaskScheduledEvent(
+                                    payload={
+                                        'task_id': target_task.task_id,
+                                        'scheduled_for': parsed_date.isoformat(),
+                                        'scheduling_method': 'llm_update_request'
+                                    }
+                                )
+                                store.append(scheduled_event)
+                                console.print(f"📅 Due date set to: {parsed_date.strftime('%A, %B %d')}", style="cyan")
+                                updated_something = True
+
+                            except (ValueError, TypeError) as e:
+                                console.print(f"⚠️ Failed to parse due date: {updates['due_date']}", style="yellow")
+                                console.print(f"   Error: {str(e)}", style="dim")
 
                         if not updated_something:
                             console.print("ℹ️ No changes detected in the request", style="dim yellow")
