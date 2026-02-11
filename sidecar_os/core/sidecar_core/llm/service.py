@@ -477,6 +477,116 @@ Please provide a {style} summary in markdown format."""
                 "event_count": len(events)
             }
 
+    async def parse_task_update_request(
+        self,
+        natural_text: str,
+        available_tasks: List[Dict[str, Any]],
+        current_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Parse natural language task update requests.
+
+        Args:
+            natural_text: Natural language update request
+            available_tasks: List of current tasks with metadata
+            current_date: Current date for temporal parsing
+
+        Returns:
+            Parsed update request with task match and changes
+        """
+        if current_date is None:
+            current_date = datetime.now(UTC)
+
+        # Create task context for LLM
+        task_context = []
+        for task in available_tasks[:20]:  # Limit to prevent token overflow
+            task_context.append({
+                "id_short": task.get("task_id_short", task.get("task_id", "")[:8]),  # Short ID for display
+                "id_full": task.get("task_id", ""),  # Full ID for matching
+                "title": task.get("title", ""),
+                "project": task.get("project_name", ""),
+                "priority": task.get("priority", "normal"),
+                "status": task.get("status", "pending"),
+                "due_date": task.get("scheduled_for", ""),
+                "duration": task.get("duration_minutes", "")
+            })
+
+        system_prompt = f"""You are a task update parser. Parse natural language requests to update existing tasks.
+
+Current context: Today's date: {current_date.strftime('%A, %B %d, %Y')}
+
+Available tasks: {json.dumps(task_context, indent=2)}
+
+Parse the request and identify:
+1. Which task the user is referring to (match by keywords, project, or description)
+2. What updates they want to make (priority, status, due date, duration)
+
+Return JSON with this structure:
+{{
+    "task_matches": [
+        {{
+            "task_id": "full_task_id_from_id_full_field",
+            "confidence": 0.9,
+            "match_reason": "explanation of why this task matches"
+        }}
+    ],
+    "updates": {{
+        "priority": "high|normal|low|urgent|null",
+        "status": "pending|in_progress|completed|cancelled|on_hold|null",
+        "due_date": "ISO_FORMAT or relative like 'tomorrow'|null",
+        "duration_minutes": integer_or_null
+    }},
+    "confidence": 0.9,
+    "explanation": "explanation of the parsed request"
+}}
+
+Examples:
+- "completed CA ZAP update to Abhi" → status: completed, match task about CA ZAP/Abhi
+- "make xxx high priority and due date tomorrow" → priority: high, due_date: tomorrow
+- "mark the email task as in progress" → status: in_progress, match email-related task
+
+Be flexible with matching - use keywords, project names, or task descriptions. If multiple tasks could match, return them ranked by confidence."""
+
+        try:
+            response = await self.generate(
+                prompt=f"Parse this task update request: '{natural_text}'",
+                system_prompt=system_prompt,
+                temperature=0.1,
+                max_tokens=800
+            )
+
+            # Parse JSON response
+            try:
+                content = response.content.strip()
+
+                # Remove markdown code block formatting if present
+                if content.startswith('```json'):
+                    content = content[7:]  # Remove ```json
+                if content.endswith('```'):
+                    content = content[:-3]  # Remove ```
+                content = content.strip()
+
+                result = json.loads(content)
+                result["llm_response"] = response
+                return result
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from LLM response: {response.content}")
+                return {
+                    "task_matches": [],
+                    "updates": {},
+                    "confidence": 0.0,
+                    "error": "Failed to parse LLM response",
+                    "raw_response": response.content
+                }
+
+        except Exception as e:
+            logger.error(f"Task update parsing failed: {e}")
+            return {
+                "task_matches": [],
+                "updates": {},
+                "confidence": 0.0,
+                "error": str(e)
+            }
+
     def get_status(self) -> Dict[str, Any]:
         """Get service status and statistics."""
         return {

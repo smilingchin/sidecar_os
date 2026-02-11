@@ -502,32 +502,224 @@ def done(query: str) -> None:
 
 
 def update(
-    query: str,
+    natural_request: str = typer.Argument(help="Natural language task update (e.g., 'completed CA ZAP update to Abhi') or task ID for structured updates"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="Update priority (low, normal, high, urgent)"),
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Update status (pending, in_progress, completed, cancelled, on_hold)"),
     due_date: Optional[str] = typer.Option(None, "--due", "-d", help="Update due date (today, tomorrow, Friday, 2024-12-31)"),
     duration: Optional[str] = typer.Option(None, "--duration", "--dur", help="Update duration ([30min], [2h], [1.5h])")
 ) -> None:
-    """Update task properties (priority, status, due date, duration)."""
+    """Update task properties using natural language or structured options.
+
+    Examples:
+      sidecar update "completed CA ZAP update to Abhi"
+      sidecar update "make the email task high priority and due tomorrow"
+      sidecar update "mark LPD experiments as in progress"
+      sidecar update abc123 --priority high --due tomorrow  # structured mode
+    """
     # Load events and project state
     store = EventStore()
     events = store.read_all()
     state = project_events_to_state(events)
 
-    # Find the task by ID or title
-    task = None
-    for t in state.tasks.values():
-        if (t.task_id == query or
-            t.task_id.startswith(query) or
-            query.lower() in t.title.lower()):
-            task = t
-            break
+    # Check if this is natural language or structured mode
+    has_structured_options = any([priority, status, due_date, duration])
 
-    if not task:
-        console.print(f"❌ Task not found: {query}", style="red")
-        console.print("💡 Try: sidecar list  # to see available tasks", style="dim")
+    if not has_structured_options:
+        # Natural language mode - use LLM to parse the request
+        import asyncio
+        asyncio.run(_handle_natural_language_update(natural_request, store, state))
         return
+    else:
+        # Structured mode - find task by ID or title match
+        task = None
+        for t in state.tasks.values():
+            if (t.task_id == natural_request or
+                t.task_id.startswith(natural_request) or
+                natural_request.lower() in t.title.lower()):
+                task = t
+                break
 
+        if not task:
+            console.print(f"❌ Task not found: {natural_request}", style="red")
+            console.print("💡 Try: sidecar list  # to see available tasks", style="dim")
+            return
+
+        # Continue with structured update logic
+        import asyncio
+        asyncio.run(_handle_structured_update(task, store, priority, status, due_date, duration))
+
+
+async def _handle_natural_language_update(natural_request: str, store: EventStore, state) -> None:
+    """Handle natural language task update requests using LLM parsing."""
+    from sidecar_os.core.sidecar_core.llm import LLMService, LLMConfig
+
+    # Prepare task data for LLM
+    task_data = []
+    for task in state.get_active_tasks()[:20]:  # Limit to prevent context overflow
+        task_data.append({
+            "task_id": task.task_id,  # Full task ID for matching
+            "task_id_short": task.task_id[:8],  # Short ID for context
+            "title": task.title,
+            "project_name": state.projects[task.project_id].name if task.project_id and task.project_id in state.projects else "",
+            "priority": task.priority or "normal",
+            "status": task.status,
+            "scheduled_for": task.scheduled_for.isoformat() if task.scheduled_for else None,
+            "duration_minutes": task.duration_minutes
+        })
+
+    # Initialize LLM service
+    llm_config = LLMConfig()
+    llm_service = LLMService(llm_config)
+
+    console.print(f"🧠 Parsing request: [bold]{natural_request}[/bold]")
+
+    try:
+        # Parse the natural language request
+        parse_result = await llm_service.parse_task_update_request(
+            natural_text=natural_request,
+            available_tasks=task_data
+        )
+
+        if parse_result.get("confidence", 0) < 0.5:
+            console.print("❌ Could not understand the request. Try being more specific.", style="red")
+            console.print(f"   Error: {parse_result.get('explanation', 'Low confidence parsing')}", style="dim")
+            return
+
+        # Find matching tasks
+        task_matches = parse_result.get("task_matches", [])
+        if not task_matches:
+            console.print("❌ Could not find any matching tasks.", style="red")
+            console.print("💡 Try: sidecar list  # to see available tasks", style="dim")
+            return
+
+        # Use the best matching task
+        best_match = task_matches[0]
+        task_id = best_match.get("task_id")
+        task = state.tasks.get(task_id)
+
+        if not task:
+            console.print(f"❌ Task not found: {task_id}", style="red")
+            return
+
+        console.print(f"✅ Found task: [bold]{task.title}[/bold] (confidence: {best_match.get('confidence', 0):.1f})")
+        console.print(f"   Reason: {best_match.get('match_reason', 'Pattern match')}", style="dim")
+
+        # Apply updates from LLM parsing
+        updates = parse_result.get("updates", {})
+        await _apply_updates_from_llm(task, store, updates)
+
+    except Exception as e:
+        console.print(f"❌ Failed to parse request: {str(e)}", style="red")
+        console.print("💡 Try using structured options: sidecar update <task_id> --priority high", style="dim")
+
+
+async def _apply_updates_from_llm(task, store: EventStore, updates: dict) -> None:
+    """Apply updates parsed from LLM to a task."""
+    events_created = []
+
+    # Show current task info
+    console.print()
+    console.print(f"📋 Updating Task: [bold]{task.title}[/bold]")
+    console.print(f"   Current Priority: {task.priority or 'normal'}")
+    console.print(f"   Current Status: {task.status}")
+    console.print(f"   Current Due Date: {task.scheduled_for.strftime('%a %b %d, %Y') if task.scheduled_for else 'Not set'}")
+    console.print(f"   Current Duration: {task.duration_minutes}min" if task.duration_minutes else "   Current Duration: Not set")
+    console.print()
+
+    # Update Priority
+    if updates.get("priority") and updates["priority"] != "null":
+        priority = updates["priority"].lower()
+        valid_priorities = ["low", "normal", "high", "urgent"]
+        if priority in valid_priorities:
+            priority_event = TaskPriorityUpdatedEvent(
+                payload={
+                    "task_id": task.task_id,
+                    "priority": priority,
+                    "previous_priority": task.priority or "normal"
+                }
+            )
+            store.append(priority_event)
+            events_created.append(f"Priority → {priority}")
+
+    # Update Status
+    if updates.get("status") and updates["status"] != "null":
+        status = updates["status"].lower()
+        valid_statuses = ["pending", "in_progress", "completed", "cancelled", "on_hold"]
+        if status in valid_statuses:
+            status_event = TaskStatusUpdatedEvent(
+                payload={
+                    "task_id": task.task_id,
+                    "status": status,
+                    "previous_status": task.status
+                }
+            )
+            store.append(status_event)
+            events_created.append(f"Status → {status}")
+
+    # Update Due Date
+    if updates.get("due_date") and updates["due_date"] != "null":
+        due_date_text = updates["due_date"]
+
+        # Handle relative dates
+        if due_date_text.lower() in ['today', 'tomorrow']:
+            from sidecar_os.core.sidecar_core.router.interpreter import AdvancedPatternInterpreter
+            interpreter = AdvancedPatternInterpreter()
+            due_date_iso = interpreter._convert_relative_date_to_iso(due_date_text.lower())
+        else:
+            # Try as ISO format
+            try:
+                from datetime import datetime
+                parsed_date = datetime.fromisoformat(due_date_text.replace('Z', '+00:00'))
+                due_date_iso = parsed_date.isoformat()
+            except (ValueError, AttributeError):
+                console.print(f"⚠️  Could not parse due date: {due_date_text}", style="yellow")
+                due_date_iso = None
+
+        if due_date_iso:
+            scheduled_event = TaskScheduledEvent(
+                payload={
+                    "task_id": task.task_id,
+                    "scheduled_for": due_date_iso
+                }
+            )
+            store.append(scheduled_event)
+            events_created.append(f"Due Date → {due_date_text}")
+
+    # Update Duration
+    if updates.get("duration_minutes") and isinstance(updates["duration_minutes"], int) and updates["duration_minutes"] > 0:
+        duration_minutes = updates["duration_minutes"]
+        duration_event = TaskDurationSetEvent(
+            payload={
+                "task_id": task.task_id,
+                "duration_minutes": duration_minutes
+            }
+        )
+        store.append(duration_event)
+
+        # Format for display
+        if duration_minutes >= 60:
+            hours = duration_minutes // 60
+            minutes = duration_minutes % 60
+            if minutes == 0:
+                duration_display = f"{hours}h"
+            else:
+                duration_display = f"{hours}h{minutes}m"
+        else:
+            duration_display = f"{duration_minutes}m"
+        events_created.append(f"Duration → {duration_display}")
+
+    # Display results
+    if events_created:
+        console.print("✅ Task updated successfully:", style="green")
+        for update in events_created:
+            console.print(f"   • {update}")
+        console.print(f"   Task ID: {task.task_id}", style="dim")
+    else:
+        console.print("ℹ️  No updates were applied based on the request.", style="yellow")
+
+
+async def _handle_structured_update(task, store: EventStore, priority: str, status: str, due_date: str, duration: str) -> None:
+    """Handle structured task updates with explicit parameters."""
     # Show current task info
     console.print(f"📋 Updating Task: [bold]{task.title}[/bold]")
     console.print(f"   Current Priority: {task.priority or 'normal'}")
@@ -537,7 +729,6 @@ def update(
     console.print()
 
     events_created = []
-    updates_made = []
 
     # Update Priority
     if priority:
@@ -553,7 +744,7 @@ def update(
                 "previous_priority": task.priority or "normal"
             }
         )
-        event_id = store.append(priority_event)
+        store.append(priority_event)
         events_created.append(f"Priority → {priority.lower()}")
 
     # Update Status
@@ -570,7 +761,7 @@ def update(
                 "previous_status": task.status
             }
         )
-        event_id = store.append(status_event)
+        store.append(status_event)
         events_created.append(f"Status → {status.lower()}")
 
     # Update Due Date
@@ -600,7 +791,7 @@ def update(
                     "scheduled_for": due_date_iso
                 }
             )
-            event_id = store.append(scheduled_event)
+            store.append(scheduled_event)
             events_created.append(f"Due Date → {due_date}")
 
     # Update Duration
@@ -629,7 +820,7 @@ def update(
                     "duration_minutes": duration_minutes
                 }
             )
-            event_id = store.append(duration_event)
+            store.append(duration_event)
 
             # Format for display
             if duration_minutes >= 60:
