@@ -170,7 +170,7 @@ class SidecarState(BaseModel):
 
         def sort_key(task: Task):
             if not task.scheduled_for:
-                return (2, datetime.max)  # No due date goes to end
+                return (2, datetime.max.replace(tzinfo=UTC))  # No due date goes to end
             overdue = task.scheduled_for < now
             return (0 if overdue else 1, task.scheduled_for)
 

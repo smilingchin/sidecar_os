@@ -845,6 +845,268 @@ async def _handle_structured_update(task, store: EventStore, priority: str, stat
         console.print("💡 Example: sidecar update 8c5e --priority high --due tomorrow", style="dim")
 
 
+def ask(question: str = typer.Argument(help="Natural language question about your tasks (e.g., 'what is due tomorrow?')")) -> None:
+    """Ask natural language questions about your tasks and projects.
+
+    Examples:
+      sidecar ask "what is due tomorrow?"
+      sidecar ask "show me the tasks for ca zap project"
+      sidecar ask "what's overdue?"
+      sidecar ask "how many high priority tasks do I have?"
+      sidecar ask "what am I working on?"
+    """
+    import asyncio
+    asyncio.run(_handle_natural_query(question))
+
+
+async def _handle_natural_query(question: str) -> None:
+    """Handle natural language queries about tasks and projects."""
+    from sidecar_os.core.sidecar_core.llm import LLMService, LLMConfig
+    from datetime import datetime, UTC
+
+    # Load events and project state
+    store = EventStore()
+    events = store.read_all()
+    state = project_events_to_state(events)
+
+    console.print(f"🤔 [bold]{question}[/bold]")
+    console.print()
+
+    # Prepare task data for LLM
+    task_data = []
+    for task in state.tasks.values():
+        task_data.append({
+            "task_id": task.task_id,
+            "title": task.title,
+            "project_name": state.projects[task.project_id].name if task.project_id and task.project_id in state.projects else "",
+            "priority": task.priority or "normal",
+            "status": task.status,
+            "scheduled_for": task.scheduled_for.isoformat() if task.scheduled_for else None,
+            "duration_minutes": task.duration_minutes,
+            "created_at": task.created_at.isoformat() if task.created_at else None
+        })
+
+    # Prepare project data for LLM
+    project_data = []
+    for project in state.projects.values():
+        task_count = len(state.get_tasks_for_project(project.project_id))
+        project_data.append({
+            "project_id": project.project_id,
+            "name": project.name,
+            "aliases": project.aliases,
+            "task_count": task_count
+        })
+
+    # Initialize LLM service
+    llm_config = LLMConfig()
+    llm_service = LLMService(llm_config)
+
+    try:
+        # Parse the natural language question
+        parse_result = await llm_service.parse_natural_query(
+            question=question,
+            available_tasks=task_data,
+            available_projects=project_data
+        )
+
+        if parse_result.get("confidence", 0) < 0.3:
+            console.print("❌ I couldn't understand your question. Try being more specific.", style="red")
+            console.print(f"   Error: {parse_result.get('explanation', 'Low confidence parsing')}", style="dim")
+            return
+
+        # Execute the parsed query
+        await _execute_natural_query(parse_result, state, question)
+
+    except Exception as e:
+        console.print(f"❌ Failed to process question: {str(e)}", style="red")
+        console.print("💡 Try asking questions like: 'what is due tomorrow?' or 'show me high priority tasks'", style="dim")
+
+
+async def _execute_natural_query(parse_result: dict, state, original_question: str) -> None:
+    """Execute a parsed natural language query and display results."""
+    from datetime import datetime, UTC, timedelta
+
+    query_type = parse_result.get("query_type", "list_tasks")
+    filters = parse_result.get("filters", {})
+    response_style = parse_result.get("response_style", "conversational")
+
+    # Start with all tasks
+    tasks = list(state.tasks.values())
+
+    # Apply filters
+    if filters.get("project_id"):
+        tasks = [t for t in tasks if t.project_id == filters["project_id"]]
+    elif filters.get("project_name"):
+        # Find project by name (case insensitive)
+        project_name = filters["project_name"].lower()
+        project_id = None
+        for proj in state.projects.values():
+            if (proj.name.lower() == project_name or
+                project_name in [alias.lower() for alias in proj.aliases] or
+                project_name in proj.name.lower()):
+                project_id = proj.project_id
+                break
+        if project_id:
+            tasks = [t for t in tasks if t.project_id == project_id]
+
+    if filters.get("priority"):
+        tasks = [t for t in tasks if (t.priority or "normal") == filters["priority"]]
+
+    if filters.get("status"):
+        tasks = [t for t in tasks if t.status == filters["status"]]
+
+    if filters.get("keywords"):
+        keywords = [kw.lower() for kw in filters["keywords"]]
+        tasks = [t for t in tasks if any(keyword in t.title.lower() for keyword in keywords)]
+
+    # Apply date filters
+    now_utc = datetime.now(UTC)
+    today = now_utc.date()
+    tomorrow = today + timedelta(days=1)
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    if filters.get("due_date_filter"):
+        due_filter = filters["due_date_filter"]
+        try:
+            if due_filter == "today":
+                tasks = [t for t in tasks if t.scheduled_for and t.scheduled_for.date() == today]
+            elif due_filter == "tomorrow":
+                tasks = [t for t in tasks if t.scheduled_for and t.scheduled_for.date() == tomorrow]
+            elif due_filter == "overdue":
+                tasks = [t for t in tasks if t.scheduled_for and t.scheduled_for.date() < today and t.status != "completed"]
+            elif due_filter == "this_week":
+                tasks = [t for t in tasks if t.scheduled_for and week_start <= t.scheduled_for.date() <= week_end]
+        except Exception as e:
+            console.print(f"⚠️  Date filter error: {str(e)}", style="yellow")
+            # Continue without date filtering
+
+    if filters.get("created_filter"):
+        created_filter = filters["created_filter"]
+        if created_filter == "today":
+            tasks = [t for t in tasks if t.created_at and t.created_at.date() == today]
+        elif created_filter == "this_week":
+            tasks = [t for t in tasks if t.created_at and week_start <= t.created_at.date() <= week_end]
+
+    # Display results based on query type
+    if query_type == "count_tasks":
+        count = len(tasks)
+        if count == 0:
+            console.print("📊 No tasks match your criteria.", style="yellow")
+        elif count == 1:
+            console.print(f"📊 [bold]1 task[/bold] matches your criteria.", style="green")
+        else:
+            console.print(f"📊 [bold]{count} tasks[/bold] match your criteria.", style="green")
+
+        # Show a brief breakdown if there are results
+        if count > 0 and response_style == "conversational":
+            priorities = {}
+            statuses = {}
+            for task in tasks:
+                priority = task.priority or "normal"
+                priorities[priority] = priorities.get(priority, 0) + 1
+                statuses[task.status] = statuses.get(task.status, 0) + 1
+
+            if len(priorities) > 1:
+                priority_breakdown = ", ".join([f"{count} {priority}" for priority, count in priorities.items()])
+                console.print(f"   Priority: {priority_breakdown}", style="dim")
+
+            if len(statuses) > 1:
+                status_breakdown = ", ".join([f"{count} {status}" for status, count in statuses.items()])
+                console.print(f"   Status: {status_breakdown}", style="dim")
+
+    elif query_type == "list_tasks":
+        if not tasks:
+            console.print("📝 No tasks match your criteria.", style="yellow")
+            return
+
+        # Display tasks in a table format
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Task", style="white", width=50)
+        table.add_column("Project", style="cyan", width=12)
+        table.add_column("Priority", justify="center", width=8)
+        table.add_column("Status", justify="center", width=10)
+        table.add_column("Due Date", style="yellow", width=12)
+        table.add_column("Duration", style="dim", width=8)
+
+        # Sort tasks by due date (overdue first, then by proximity)
+        def sort_by_due_date(task):
+            if not task.scheduled_for:
+                return (1, datetime.max.replace(tzinfo=UTC))  # No due date goes to end
+            try:
+                overdue = task.scheduled_for.date() < today
+                return (0 if overdue else 1, task.scheduled_for)
+            except Exception as e:
+                # Fallback: put problematic dates at the end
+                return (2, datetime.max.replace(tzinfo=UTC))
+
+        try:
+            sorted_tasks = sorted(tasks, key=sort_by_due_date)
+        except Exception as e:
+            console.print(f"⚠️  Sorting error: {str(e)}", style="yellow")
+            sorted_tasks = tasks  # Use unsorted if sorting fails
+
+        for task in sorted_tasks[:20]:  # Limit to prevent overwhelming output
+            # Format due date
+            due_date_str = ""
+            if task.scheduled_for:
+                if task.scheduled_for.date() == today:
+                    due_date_str = "📅 Today"
+                elif task.scheduled_for.date() == tomorrow:
+                    due_date_str = "📅 Tomorrow"
+                elif task.scheduled_for.date() < today:
+                    due_date_str = "🔴 Overdue"
+                else:
+                    due_date_str = task.scheduled_for.strftime("%a %m-%d")
+
+            # Format duration
+            duration_str = ""
+            if task.duration_minutes:
+                if task.duration_minutes >= 60:
+                    hours = task.duration_minutes // 60
+                    minutes = task.duration_minutes % 60
+                    if minutes == 0:
+                        duration_str = f"{hours}h"
+                    else:
+                        duration_str = f"{hours}h{minutes}m"
+                else:
+                    duration_str = f"{task.duration_minutes}m"
+
+            # Get project name
+            project_name = ""
+            if task.project_id and task.project_id in state.projects:
+                project_name = state.projects[task.project_id].name
+
+            # Format task title with project prefix if no project column would show it
+            title = task.title
+            if project_name and not project_name:
+                title = f"[{project_name}] {title}"
+
+            table.add_row(
+                title[:47] + "..." if len(title) > 50 else title,
+                project_name,
+                task.priority or "normal",
+                task.status,
+                due_date_str,
+                duration_str
+            )
+
+        console.print(table)
+
+        # Add conversational response
+        if response_style == "conversational":
+            count = len(tasks)
+            if count > 20:
+                console.print(f"💡 Showing first 20 of {count} tasks", style="dim")
+            elif count == 1:
+                console.print("💬 Here's the task that matches your question.", style="green")
+            else:
+                console.print(f"💬 Found {count} tasks that match your question.", style="green")
+
+    else:
+        console.print(f"❌ Query type '{query_type}' not yet implemented.", style="red")
+
+
 def focus(
     project_query: Optional[str] = typer.Argument(None, help="Project name, ID, or alias to focus on"),
     clear: bool = typer.Option(False, "--clear", "-c", help="Clear current focus")

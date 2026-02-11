@@ -587,6 +587,127 @@ Be flexible with matching - use keywords, project names, or task descriptions. I
                 "error": str(e)
             }
 
+    async def parse_natural_query(
+        self,
+        question: str,
+        available_tasks: List[Dict[str, Any]],
+        available_projects: List[Dict[str, Any]],
+        current_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Parse natural language queries about tasks and projects.
+
+        Args:
+            question: Natural language question
+            available_tasks: List of current tasks with metadata
+            available_projects: List of current projects with metadata
+            current_date: Current date for temporal parsing
+
+        Returns:
+            Parsed query with filters and response guidance
+        """
+        if current_date is None:
+            current_date = datetime.now(UTC)
+
+        # Create context for LLM
+        task_context = []
+        for task in available_tasks[:30]:  # More context for queries
+            task_context.append({
+                "id_short": task.get("task_id", "")[:8],
+                "title": task.get("title", ""),
+                "project": task.get("project_name", ""),
+                "priority": task.get("priority", "normal"),
+                "status": task.get("status", "pending"),
+                "due_date": task.get("scheduled_for", ""),
+                "duration": task.get("duration_minutes", ""),
+                "created": task.get("created_at", "")
+            })
+
+        project_context = []
+        for project in available_projects:
+            project_context.append({
+                "id": project.get("project_id", ""),
+                "name": project.get("name", ""),
+                "aliases": project.get("aliases", []),
+                "task_count": project.get("task_count", 0)
+            })
+
+        system_prompt = f"""You are a task query parser. Parse natural language questions about tasks and projects into structured queries.
+
+Current context: Today's date: {current_date.strftime('%A, %B %d, %Y')}
+
+Available tasks: {json.dumps(task_context, indent=2)}
+Available projects: {json.dumps(project_context, indent=2)}
+
+Parse the question and return JSON with this structure:
+{{
+    "query_type": "list_tasks|count_tasks|show_projects|get_status",
+    "filters": {{
+        "project_id": "project_id_or_null",
+        "project_name": "project_name_or_null",
+        "priority": "high|normal|low|urgent|null",
+        "status": "pending|in_progress|completed|cancelled|on_hold|null",
+        "due_date_filter": "today|tomorrow|overdue|this_week|null",
+        "created_filter": "today|this_week|null",
+        "keywords": ["keyword1", "keyword2"]
+    }},
+    "response_style": "conversational|tabular|summary",
+    "confidence": 0.9,
+    "explanation": "explanation of the parsed query"
+}}
+
+Examples:
+- "what is due tomorrow?" → query_type: list_tasks, due_date_filter: tomorrow
+- "show me ca zap tasks" → query_type: list_tasks, keywords: ["ca", "zap"]
+- "how many high priority tasks?" → query_type: count_tasks, priority: high
+- "what's overdue?" → query_type: list_tasks, due_date_filter: overdue
+- "show me lpd project tasks" → query_type: list_tasks, project_name: "lpd"
+- "what am I working on?" → query_type: list_tasks, status: in_progress
+
+Be flexible with project matching - match by name, aliases, or similar keywords."""
+
+        try:
+            response = await self.generate(
+                prompt=f"Parse this question: '{question}'",
+                system_prompt=system_prompt,
+                temperature=0.1,
+                max_tokens=600
+            )
+
+            # Parse JSON response
+            try:
+                content = response.content.strip()
+
+                # Remove markdown code block formatting if present
+                if content.startswith('```json'):
+                    content = content[7:]  # Remove ```json
+                if content.endswith('```'):
+                    content = content[:-3]  # Remove ```
+                content = content.strip()
+
+                result = json.loads(content)
+                result["llm_response"] = response
+                return result
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from LLM response: {response.content}")
+                return {
+                    "query_type": "list_tasks",
+                    "filters": {},
+                    "response_style": "conversational",
+                    "confidence": 0.0,
+                    "error": "Failed to parse LLM response",
+                    "raw_response": response.content
+                }
+
+        except Exception as e:
+            logger.error(f"Natural query parsing failed: {e}")
+            return {
+                "query_type": "list_tasks",
+                "filters": {},
+                "response_style": "conversational",
+                "confidence": 0.0,
+                "error": str(e)
+            }
+
     def get_status(self) -> Dict[str, Any]:
         """Get service status and statistics."""
         return {
