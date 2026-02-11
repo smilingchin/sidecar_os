@@ -88,6 +88,10 @@ class AdvancedPatternInterpreter:
         (r"(?:by|due|deadline)\s+(\d{1,2}\/\d{1,2}|\d{1,2}-\d{1,2})", 0.8),
         (r"(?:by|due|deadline)\s+(end\s+of\s+(?:week|month|year))", 0.75),
         (r"(?:by|due|deadline)\s+(in\s+\d+\s+(?:days?|weeks?))", 0.8),
+        # Standalone temporal expressions (lower confidence)
+        (r"\b(today)\b(?!\s+(?:is|was|will))", 0.7),  # "today" not followed by "is/was/will"
+        (r"\b(tomorrow)\b(?!\s+(?:is|was|will))", 0.7),  # "tomorrow" not followed by "is/was/will"
+        (r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", 0.6),  # Standalone days
     ]
 
     DURATION_PATTERNS = [
@@ -180,10 +184,16 @@ class AdvancedPatternInterpreter:
         promise_match = self._analyze_promise_patterns(clean_text)
         update_match = self._analyze_update_patterns(clean_text)
 
-        # Analyze temporal patterns (due dates and durations) - only if confident about task/project
+        # Analyze temporal patterns (due dates and durations) for tasks or project contexts
         temporal_result = None
         try:
-            if task_match and task_match[1] > 0.6:  # Only analyze temporal if we have a good task match
+            # Run temporal analysis if we have a good task match OR project match (which can infer tasks)
+            should_analyze_temporal = (
+                (task_match and task_match[1] > 0.6) or  # Explicit task match
+                (project_match and project_match[1] > 0.7)  # Project match that could infer tasks
+            )
+
+            if should_analyze_temporal:
                 temporal_result = asyncio.run(self._analyze_temporal_patterns(text))
             else:
                 # Quick pattern-only temporal analysis to avoid LLM calls
@@ -192,7 +202,7 @@ class AdvancedPatternInterpreter:
                     "duration_minutes": None,
                     "confidence": 0.0,
                     "method": "patterns",
-                    "explanation": "No temporal analysis (low task confidence)"
+                    "explanation": "No temporal analysis (low task/project confidence)"
                 }
         except Exception as e:
             print(f"Temporal analysis failed: {e}")
@@ -277,7 +287,28 @@ class AdvancedPatternInterpreter:
             if remaining_text and len(remaining_text.split()) > 1:
                 task_event = self._create_task_event(remaining_text, text, project_id=project_match[0])
                 events.append(task_event)
+                task_id = task_event.payload["task_id"]
+
+                # Add temporal events if temporal information was detected for project-inferred tasks
+                if temporal_result and temporal_result.get("confidence", 0) > 0.5:
+                    if temporal_result.get("due_date") or temporal_result.get("due_date_text"):
+                        scheduled_event = self._create_task_scheduled_event(
+                            task_id,
+                            temporal_result.get("due_date") or temporal_result.get("due_date_text")
+                        )
+                        if scheduled_event:
+                            events.append(scheduled_event)
+
+                    if temporal_result.get("duration_minutes"):
+                        duration_event = self._create_task_duration_event(
+                            task_id,
+                            temporal_result["duration_minutes"]
+                        )
+                        events.append(duration_event)
+
                 explanations.append(f"Inferred task from project context ({project_match[1]:.0%} confidence)")
+                if temporal_result and temporal_result.get("confidence", 0) > 0.5:
+                    explanations.append(f"with {temporal_result['method']} temporal parsing")
                 max_confidence = max(max_confidence, project_match[1])
 
         # Generate explanation
@@ -859,9 +890,13 @@ class AdvancedPatternInterpreter:
         try:
             # Handle different due date formats
             if isinstance(due_date_info, str):
-                # If it's already an ISO format date string, use it directly
-                if 'T' in due_date_info and due_date_info.endswith('Z') or '+' in due_date_info:
+                # Check if it's already an ISO format date string (with or without timezone)
+                if 'T' in due_date_info and (due_date_info.endswith('Z') or '+' in due_date_info or '-' in due_date_info[-6:] or len(due_date_info) >= 19):
+                    # Already in ISO format (2026-02-11T23:59:00 or 2026-02-11T23:59:00+00:00)
                     scheduled_for = due_date_info
+                    # Add timezone if missing
+                    if 'T' in scheduled_for and not (scheduled_for.endswith('Z') or '+' in scheduled_for or scheduled_for.endswith('+00:00')):
+                        scheduled_for += '+00:00'  # Add UTC timezone
                 else:
                     # It's a relative date text like "Friday", "tomorrow" - convert using simple logic
                     scheduled_for = self._convert_relative_date_to_iso(due_date_info)
