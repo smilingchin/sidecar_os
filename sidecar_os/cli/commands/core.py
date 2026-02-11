@@ -32,8 +32,8 @@ def add(text: str) -> None:
     )
 
     # Store the event
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     inbox_event_id = store.append(inbox_event)
 
     # Load current state for context (including artifacts)
@@ -246,8 +246,8 @@ def status() -> None:
     console.print("📊 Sidecar OS Status", style="bold blue")
 
     # Load and project events to current state, including artifacts
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -441,7 +441,7 @@ def status() -> None:
 def project_add(name: str, alias: Optional[str] = typer.Option(None, "--alias", "-a", help="Project alias")) -> None:
     """Manually add a new project."""
     # Basic project creation
-    store = EventStore()
+    store = EventStore("sidecar_os/data")
     project_id = name.lower().replace(' ', '-')
 
     project_event = ProjectCreatedEvent(
@@ -464,8 +464,8 @@ def project_add(name: str, alias: Optional[str] = typer.Option(None, "--alias", 
 def project_list() -> None:
     """List all projects."""
     # Load events and project state, including artifacts
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -516,8 +516,8 @@ def list_items(
 ) -> None:
     """List inbox items and tasks."""
     # Load events and project state, including artifacts
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -672,8 +672,8 @@ def update(
 ) -> None:
     """Update task properties using natural language or structured options."""
 
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
@@ -682,12 +682,118 @@ def update(
     if natural_language_request:
         console.print(f"🔄 Processing: {natural_language_request}", style="dim")
 
-        # Use LLM to parse the update request
+        # Check if this looks like mixed content (task update + artifact)
+        mixed_content_indicators = [
+            "slack", "email", "message", "sent", "response", "here is", "below is",
+            "attached", "document", "link", "url", "meeting notes", "call notes"
+        ]
+
+        request_lower = natural_language_request.lower()
+        is_mixed_content = any(indicator in request_lower for indicator in mixed_content_indicators)
+
         try:
             llm_service = LLMService()
 
-            # Simple pattern matching for common updates
-            request_lower = natural_language_request.lower()
+            # Use Phase 7 mixed content parsing for complex input
+            if is_mixed_content and len(natural_language_request) > 100:
+                console.print("🧠 Using AI mixed content parsing...", style="dim cyan")
+
+                # Get current context for better matching
+                current_context = {
+                    "projects": {p.project_id: {"name": p.name} for p in state.projects.values()},
+                    "tasks": {t.task_id: {"title": t.title, "status": t.status, "project_id": t.project_id}
+                            for t in state.get_active_tasks()[:20]}
+                }
+
+                # Parse mixed content using LLM
+                def run_async_parse():
+                    import asyncio
+                    return asyncio.run(llm_service.parse_mixed_content(natural_language_request, current_context))
+
+                parsed_content = run_async_parse()
+
+                overall_confidence = parsed_content.get('overall_confidence', 0)
+                if overall_confidence > 0.7:
+                    console.print(f"✨ Parsed with {overall_confidence:.0%} confidence", style="dim green")
+
+                    best_match = None
+
+                    # Handle task updates from parsed content
+                    if parsed_content.get('tasks') and len(parsed_content['tasks']) > 0:
+                        # Use the first (highest confidence) task
+                        task_data = parsed_content['tasks'][0]
+
+                        # Find best matching task using project and task hints
+                        all_tasks = state.get_active_tasks() + state.get_completed_tasks()
+                        best_score = 0
+
+                        # Use LLM hints for better matching
+                        search_terms = []
+                        if task_data.get('project_hints'):
+                            search_terms.extend([hint.lower() for hint in task_data['project_hints']])
+                        if task_data.get('title'):
+                            search_terms.extend(task_data['title'].lower().split())
+
+                        for task in all_tasks:
+                            task_text = f"{task.title} {task.description or ''} {task.project_id or ''}".lower()
+                            matches = sum(1 for term in search_terms if term and len(term) > 2 and term in task_text)
+                            if matches > best_score:
+                                best_match = task
+                                best_score = matches
+
+                        if best_match:
+                            console.print(f"🎯 Matched task: {best_match.title}", style="green")
+
+                            # Apply status update if detected
+                            if task_data.get('status') and best_match.status != task_data['status']:
+                                if task_data['status'] == "completed":
+                                    event = TaskCompletedEvent(
+                                        payload={
+                                            "task_id": best_match.task_id,
+                                            "completion_method": "mixed_content_parsing"
+                                        }
+                                    )
+                                else:
+                                    event = TaskStatusUpdatedEvent(
+                                        payload={
+                                            "task_id": best_match.task_id,
+                                            "old_status": best_match.status,
+                                            "new_status": task_data['status']
+                                        }
+                                    )
+                                store.append(event)
+                                console.print(f"✅ Task status updated to: {task_data['status']}", style="green")
+                        else:
+                            console.print("⚠️ No matching task found for update", style="yellow")
+
+                    # Handle artifact creation from parsed content
+                    if parsed_content.get('artifacts') and len(parsed_content['artifacts']) > 0:
+                        for artifact_data in parsed_content['artifacts']:
+                            # Create artifact registration event
+                            import uuid
+                            artifact_event = ArtifactRegisteredEvent(
+                                payload={
+                                    "artifact_id": str(uuid.uuid4()),
+                                    "artifact_type": artifact_data.get('artifact_type', 'message'),
+                                    "title": artifact_data.get('title', 'Mixed content artifact'),
+                                    "content": artifact_data.get('content'),
+                                    "url": artifact_data.get('url'),
+                                    "source": artifact_data.get('source', 'mixed_content_parsing'),
+                                    "project_id": None,  # Will be inferred from task if linked
+                                    "task_id": best_match.task_id if best_match else None,
+                                    "created_by": "mixed_content_parser",
+                                    "metadata": artifact_data.get('metadata', {})
+                                }
+                            )
+
+                            artifact_store.register_artifact(artifact_event)
+                            console.print(f"📎 Created artifact: {artifact_data.get('title', 'Mixed content artifact')}", style="cyan")
+
+                    return  # Exit early since we handled it with mixed content parsing
+                else:
+                    console.print(f"⚠️ Low confidence ({overall_confidence:.0%}), falling back to simple parsing", style="yellow")
+
+            # Simple pattern matching for common updates (fallback)
 
             # Look for status updates
             target_status = None
@@ -739,18 +845,26 @@ def update(
             if target_status and target_task.status != target_status:
                 if target_status == "completed":
                     event = TaskCompletedEvent(
-                        related_task_id=target_task.task_id,
-                        payload={"completion_method": "manual"}
+                        payload={
+                            "task_id": target_task.task_id,
+                            "completion_method": "manual"
+                        }
                     )
                 elif target_status == "in_progress":
                     event = TaskStatusUpdatedEvent(
-                        related_task_id=target_task.task_id,
-                        payload={"old_status": target_task.status, "new_status": "in_progress"}
+                        payload={
+                            "task_id": target_task.task_id,
+                            "old_status": target_task.status,
+                            "new_status": "in_progress"
+                        }
                     )
                 elif target_status == "pending":
                     event = TaskStatusUpdatedEvent(
-                        related_task_id=target_task.task_id,
-                        payload={"old_status": target_task.status, "new_status": "pending"}
+                        payload={
+                            "task_id": target_task.task_id,
+                            "old_status": target_task.status,
+                            "new_status": "pending"
+                        }
                     )
 
                 store.append(event)
@@ -759,8 +873,11 @@ def update(
 
             if target_priority and target_task.priority != target_priority:
                 event = TaskPriorityUpdatedEvent(
-                    related_task_id=target_task.task_id,
-                    payload={"old_priority": target_task.priority, "new_priority": target_priority}
+                    payload={
+                        "task_id": target_task.task_id,
+                        "old_priority": target_task.priority,
+                        "new_priority": target_priority
+                    }
                 )
                 store.append(event)
                 console.print(f"✅ Priority updated to: {target_priority}", style="green")
@@ -794,21 +911,29 @@ def update(
         if status:
             if status == "completed":
                 event = TaskCompletedEvent(
-                    related_task_id=target_task.task_id,
-                    payload={"completion_method": "manual"}
+                    payload={
+                        "task_id": target_task.task_id,
+                        "completion_method": "manual"
+                    }
                 )
             else:
                 event = TaskStatusUpdatedEvent(
-                    related_task_id=target_task.task_id,
-                    payload={"old_status": target_task.status, "new_status": status}
+                    payload={
+                        "task_id": target_task.task_id,
+                        "old_status": target_task.status,
+                        "new_status": status
+                    }
                 )
             store.append(event)
             console.print(f"✅ Status updated to: {status}", style="green")
 
         if priority:
             event = TaskPriorityUpdatedEvent(
-                related_task_id=target_task.task_id,
-                payload={"old_priority": target_task.priority, "new_priority": priority}
+                payload={
+                    "task_id": target_task.task_id,
+                    "old_priority": target_task.priority,
+                    "new_priority": priority
+                }
             )
             store.append(event)
             console.print(f"✅ Priority updated to: {priority}", style="green")
@@ -827,8 +952,10 @@ def update(
                     target_date = datetime.fromisoformat(due_date)
 
                 event = TaskScheduledEvent(
-                    related_task_id=target_task.task_id,
-                    payload={"scheduled_for": target_date.isoformat()}
+                    payload={
+                        "task_id": target_task.task_id,
+                        "scheduled_for": target_date.isoformat()
+                    }
                 )
                 store.append(event)
                 console.print(f"✅ Due date updated to: {target_date.strftime('%Y-%m-%d')}", style="green")
@@ -849,8 +976,10 @@ def update(
 
                 if duration_minutes:
                     event = TaskDurationSetEvent(
-                        related_task_id=target_task.task_id,
-                        payload={"duration_minutes": duration_minutes}
+                        payload={
+                            "task_id": target_task.task_id,
+                            "duration_minutes": duration_minutes
+                        }
                     )
                     store.append(event)
                     console.print(f"✅ Duration updated to: {duration}", style="green")
@@ -877,8 +1006,8 @@ def update(
 def ask(question: str = typer.Argument(..., help="Natural language question about your tasks and projects")) -> None:
     """Ask natural language questions about your tasks, projects, and productivity."""
     # Load current state
-    store = EventStore()
-    artifact_store = ArtifactStore()
+    store = EventStore("sidecar_os/data")
+    artifact_store = ArtifactStore("sidecar_os/data")
     events = store.read_all()
     artifact_events = artifact_store.read_all_artifact_events()
     state = project_events_to_state(events, artifact_events)
