@@ -540,7 +540,7 @@ Return JSON with this structure:
 }}
 
 Examples:
-- "completed CA ZAP update to Abhi" → status: completed, match task about CA ZAP/Abhi
+- "completed project update to Alice" → status: completed, match task about project/Alice
 - "make xxx high priority and due date tomorrow" → priority: high, due_date: tomorrow
 - "mark the email task as in progress" → status: in_progress, match email-related task
 
@@ -768,8 +768,8 @@ Types of artifacts to detect:
 - **gdrive**: Google Drive files (look for drive.google.com URLs)
 
 Examples of mixed content:
-- "Sent CA ZAP slack message to Abhi: 'Progress update...' - need to follow up by Friday"
-  → Task: "Follow up with Abhi by Friday", Artifact: Slack message with content
+- "Sent project slack message to Alice: 'Progress update...' - need to follow up by Friday"
+  → Task: "Follow up with Alice by Friday", Artifact: Slack message with content
 - "Got approval email from legal team - can proceed with migration"
   → Task: "Proceed with migration", Artifact: Email from legal team
 - "Meeting notes from team standup: discussed blockers and next steps"
@@ -821,7 +821,7 @@ Guidelines:
 - Be conservative with confidence scores (>0.8 only when very certain)
 - Extract full content when explicitly provided (e.g. "sent this email: [content]")
 - Generate descriptive titles for artifacts
-- Use project_hints to suggest associations (e.g. "CA ZAP", "lpd", "q1-planning")
+- Use project_hints to suggest associations (e.g. "project-x", "dashboard", "q1-planning")
 - Create relationships when tasks and artifacts clearly relate
 - If input is just a task or just an artifact, still return the full structure
 - Use null for optional fields when not applicable
