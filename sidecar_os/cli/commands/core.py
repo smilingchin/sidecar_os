@@ -1246,7 +1246,7 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
     console.print()
 
     # Day summary questions
-    if any(phrase in question_lower for phrase in ["how is my day", "how's my day", "day today", "today going"]):
+    if any(phrase in question_lower for phrase in ["how is my day", "how's my day", "day today", "today going", "what do i have today", "what do I have today", "have today", "today's tasks", "tasks today"]):
         console.print("📅 Your Day Today:", style="bold blue")
 
         # Today's tasks due
@@ -1265,6 +1265,11 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
         overdue = state.get_overdue_tasks()
         if overdue:
             console.print(f"• {len(overdue)} overdue tasks", style="red")
+            for task in overdue[:3]:  # Show first 3 overdue
+                status_icon = "🟡" if task.status == "in_progress" else "🔴"
+                console.print(f"  {status_icon} {task.title}", style="dim red")
+            if len(overdue) > 3:
+                console.print(f"  ... and {len(overdue) - 3} more", style="dim")
 
         # Recent activity
         unprocessed = state.get_unprocessed_inbox()
