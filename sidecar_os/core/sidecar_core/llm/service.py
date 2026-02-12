@@ -757,6 +757,12 @@ Your task is to analyze natural language input and identify:
 3. **Relationships** - How tasks and artifacts relate to each other
 4. **Project associations** - Which projects this content relates to
 
+**IMPORTANT - Routing Hints:**
+- If input starts with "INFO:" or contains routing hints, treat as INFORMATION ONLY
+- INFO routing means: create artifacts but NO TASKS, even if actionable items are mentioned
+- Example: "INFO: Meeting notes with action items" → create meeting_notes artifact only, ignore action items
+- Other routing hints: "TASK:", "COMPLETE:", "UPDATE:" (process normally)
+
 Types of artifacts to detect:
 - **slack_msg**: Slack messages, DMs, channel posts (look for "slack", "sent message", "DM")
 - **email**: Email content, correspondence (look for "email", "sent to", "received from")

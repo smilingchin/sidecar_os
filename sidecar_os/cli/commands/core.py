@@ -38,22 +38,51 @@ def add(text: str) -> None:
     # Strip whitespace for consistency
     trimmed_text = text.strip()
 
-    # Check for explicit project prefix (e.g., "ProjectName: task description")
+    # Check for routing hints and project prefixes
     explicit_project_id = None
     explicit_project_name = None
+    routing_hint = None
+
+    # First check for routing hints (INFO:, TASK:, COMPLETE:, UPDATE:)
+    routing_hints = ['INFO:', 'TASK:', 'COMPLETE:', 'UPDATE:', 'URGENT:']
 
     if ':' in trimmed_text and not trimmed_text.startswith('http'):  # Avoid URLs
         parts = trimmed_text.split(':', 1)
         if len(parts) == 2:
-            potential_project = parts[0].strip()
-            # Check if this looks like a project name (no spaces or reasonable length)
-            if len(potential_project) <= 50 and not any(char in potential_project for char in ['?', '!', '.', ';']):
-                # Clean up project name formatting
-                explicit_project_name = potential_project.replace('_', ' ').title()
-                # Update trimmed text to remove the project prefix
-                trimmed_text = parts[1].strip()
+            potential_prefix = parts[0].strip().upper() + ':'
+            remaining_content = parts[1].strip()
 
-                console.print(f"📂 Detected explicit project: {explicit_project_name}", style="dim cyan")
+            # Check if this is a routing hint
+            if potential_prefix in routing_hints:
+                routing_hint = potential_prefix.replace(':', '').lower()
+                console.print(f"🎯 Detected routing hint: {routing_hint.upper()}", style="dim magenta")
+
+                # For INFO routing, look for project pattern in remaining content
+                if routing_hint == 'info' and ':' in remaining_content and not remaining_content.startswith('http'):
+                    content_parts = remaining_content.split(':', 1)
+                    if len(content_parts) == 2:
+                        potential_project = content_parts[0].strip()
+                        if len(potential_project) <= 50 and not any(char in potential_project for char in ['?', '!', '.', ';']):
+                            explicit_project_name = potential_project.replace('_', ' ').title()
+                            trimmed_text = content_parts[1].strip()
+                            console.print(f"📂 Detected explicit project: {explicit_project_name}", style="dim cyan")
+                        else:
+                            trimmed_text = remaining_content
+                    else:
+                        trimmed_text = remaining_content
+                else:
+                    trimmed_text = remaining_content
+
+            else:
+                # Not a routing hint, treat as potential project name
+                potential_project = parts[0].strip()
+                if len(potential_project) <= 50 and not any(char in potential_project for char in ['?', '!', '.', ';']):
+                    # Clean up project name formatting
+                    explicit_project_name = potential_project.replace('_', ' ').title()
+                    # Update trimmed text to remove the project prefix
+                    trimmed_text = parts[1].strip()
+
+                    console.print(f"📂 Detected explicit project: {explicit_project_name}", style="dim cyan")
 
     # Create and store inbox captured event
     inbox_event = InboxCapturedEvent(
@@ -114,7 +143,8 @@ def add(text: str) -> None:
             # Prepare context for mixed content parsing
             context = {
                 'projects': {p.project_id: {'name': p.name, 'aliases': p.aliases} for p in state.projects.values()},
-                'tasks': {t.task_id: {'title': t.title, 'project_id': t.project_id, 'status': t.status} for t in state.tasks.values()}
+                'tasks': {t.task_id: {'title': t.title, 'project_id': t.project_id, 'status': t.status} for t in state.tasks.values()},
+                'routing_hint': routing_hint
             }
 
             # Try LLM-powered mixed content parsing
@@ -128,100 +158,106 @@ def add(text: str) -> None:
                 used_mixed_parsing = True
                 from uuid import uuid4
 
-                # Create tasks from parsed content
-                for i, parsed_task in enumerate(mixed_content_result.get('tasks', [])):
-                    task_id = f"task_{len(state.tasks) + i + 1}"
+                # Handle routing hints - INFO routing should skip task creation
+                if routing_hint == 'info':
+                    console.print(f"📎 INFO routing: Skipping task creation, artifact-only mode", style="dim yellow")
+                    # Skip task creation for INFO routing
+                    pass
+                else:
+                    # Create tasks from parsed content (normal behavior)
+                    for i, parsed_task in enumerate(mixed_content_result.get('tasks', [])):
+                        task_id = f"task_{len(state.tasks) + i + 1}"
 
-                    # Use explicit project if specified, otherwise find from hints
-                    project_id = explicit_project_id
-                    if not project_id:
-                        for hint in parsed_task.get('project_hints', []):
-                            project = state.find_project_by_alias(hint)
-                            if project:
-                                project_id = project.project_id
-                                break
+                        # Use explicit project if specified, otherwise find from hints
+                        project_id = explicit_project_id
+                        if not project_id:
+                            for hint in parsed_task.get('project_hints', []):
+                                project = state.find_project_by_alias(hint)
+                                if project:
+                                    project_id = project.project_id
+                                    break
 
-                    task_event = TaskCreatedEvent(
-                        payload={
-                            'task_id': task_id,
-                            'title': parsed_task.get('title', 'Untitled task'),
-                            'description': parsed_task.get('description'),
-                            'created_from_event': inbox_event_id,
-                            'priority': parsed_task.get('priority'),
-                            'project_id': project_id
-                        }
-                    )
+                        task_event = TaskCreatedEvent(
+                            payload={
+                                'task_id': task_id,
+                                'title': parsed_task.get('title', 'Untitled task'),
+                                'description': parsed_task.get('description'),
+                                'created_from_event': inbox_event_id,
+                                'priority': parsed_task.get('priority'),
+                                'project_id': project_id
+                            }
+                        )
 
-                    task_event_id = store.append(task_event)
-                    additional_events.append(('task', task_event, task_event_id))
+                        task_event_id = store.append(task_event)
+                        additional_events.append(('task', task_event, task_event_id))
 
-                    # Handle due date if parsed
-                    if parsed_task.get('due_date'):
-                        try:
-                            from datetime import datetime, UTC
-                            due_date_str = parsed_task['due_date']
+                        # Handle due date if parsed
+                        if parsed_task.get('due_date'):
+                            try:
+                                from datetime import datetime, UTC
+                                due_date_str = parsed_task['due_date']
 
-                            # Handle relative dates like "tomorrow", "friday", etc.
-                            if due_date_str.lower() in ['tomorrow', 'friday', 'monday', 'tuesday', 'wednesday', 'thursday', 'saturday', 'sunday']:
-                                # Use LLM temporal parsing for relative dates
-                                llm_service = LLMService()
+                                # Handle relative dates like "tomorrow", "friday", etc.
+                                if due_date_str.lower() in ['tomorrow', 'friday', 'monday', 'tuesday', 'wednesday', 'thursday', 'saturday', 'sunday']:
+                                    # Use LLM temporal parsing for relative dates
+                                    llm_service = LLMService()
 
-                                async def parse_due_date():
-                                    return await llm_service.parse_temporal_expressions(f"due {due_date_str}")
+                                    async def parse_due_date():
+                                        return await llm_service.parse_temporal_expressions(f"due {due_date_str}")
 
-                                import asyncio
-                                temporal_result = asyncio.run(parse_due_date())
+                                    import asyncio
+                                    temporal_result = asyncio.run(parse_due_date())
 
-                                if temporal_result.get('due_date') and temporal_result.get('confidence', 0) > 0.6:
-                                    due_date_iso = temporal_result['due_date']
-                                    scheduled_event = TaskScheduledEvent(
+                                    if temporal_result.get('due_date') and temporal_result.get('confidence', 0) > 0.6:
+                                        due_date_iso = temporal_result['due_date']
+                                        scheduled_event = TaskScheduledEvent(
+                                            payload={
+                                                'task_id': task_id,
+                                                'scheduled_for': due_date_iso,
+                                                'scheduling_method': 'llm_mixed_content'
+                                            }
+                                        )
+                                        scheduled_event_id = store.append(scheduled_event)
+                                        additional_events.append(('schedule', scheduled_event, scheduled_event_id))
+
+                                else:
+                                    # Try to parse as ISO date directly
+                                    try:
+                                        parsed_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+                                        scheduled_event = TaskScheduledEvent(
+                                            payload={
+                                                'task_id': task_id,
+                                                'scheduled_for': parsed_date.isoformat(),
+                                                'scheduling_method': 'llm_mixed_content'
+                                            }
+                                        )
+                                        scheduled_event_id = store.append(scheduled_event)
+                                        additional_events.append(('schedule', scheduled_event, scheduled_event_id))
+                                    except ValueError:
+                                        # Failed to parse date, skip scheduling
+                                        pass
+
+                            except Exception as e:
+                                # Silently skip due date parsing errors
+                                pass
+
+                        # Handle duration if parsed
+                        if parsed_task.get('duration_minutes'):
+                            try:
+                                duration = int(parsed_task['duration_minutes'])
+                                if 0 < duration <= 24 * 60:  # Reasonable duration (max 24 hours)
+                                    duration_event = TaskDurationSetEvent(
                                         payload={
                                             'task_id': task_id,
-                                            'scheduled_for': due_date_iso,
-                                            'scheduling_method': 'llm_mixed_content'
+                                            'duration_minutes': duration,
+                                            'estimation_method': 'llm_mixed_content'
                                         }
                                     )
-                                    scheduled_event_id = store.append(scheduled_event)
-                                    additional_events.append(('schedule', scheduled_event, scheduled_event_id))
-
-                            else:
-                                # Try to parse as ISO date directly
-                                try:
-                                    parsed_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
-                                    scheduled_event = TaskScheduledEvent(
-                                        payload={
-                                            'task_id': task_id,
-                                            'scheduled_for': parsed_date.isoformat(),
-                                            'scheduling_method': 'llm_mixed_content'
-                                        }
-                                    )
-                                    scheduled_event_id = store.append(scheduled_event)
-                                    additional_events.append(('schedule', scheduled_event, scheduled_event_id))
-                                except ValueError:
-                                    # Failed to parse date, skip scheduling
-                                    pass
-
-                        except Exception as e:
-                            # Silently skip due date parsing errors
-                            pass
-
-                    # Handle duration if parsed
-                    if parsed_task.get('duration_minutes'):
-                        try:
-                            duration = int(parsed_task['duration_minutes'])
-                            if 0 < duration <= 24 * 60:  # Reasonable duration (max 24 hours)
-                                duration_event = TaskDurationSetEvent(
-                                    payload={
-                                        'task_id': task_id,
-                                        'duration_minutes': duration,
-                                        'estimation_method': 'llm_mixed_content'
-                                    }
-                                )
-                                duration_event_id = store.append(duration_event)
-                                additional_events.append(('duration', duration_event, duration_event_id))
-                        except (ValueError, TypeError):
-                            # Skip invalid durations
-                            pass
+                                    duration_event_id = store.append(duration_event)
+                                    additional_events.append(('duration', duration_event, duration_event_id))
+                            except (ValueError, TypeError):
+                                # Skip invalid durations
+                                pass
 
                 # Create artifacts from parsed content
                 for i, parsed_artifact in enumerate(mixed_content_result.get('artifacts', [])):
