@@ -971,6 +971,200 @@ Remember: Today is {current_date.strftime('%A, %B %d, %Y')}"""
             if not rel.get("_invalid", False)
         ]
 
+    async def analyze_question_intent(
+        self,
+        question: str,
+        available_commands: List[str],
+        system_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Analyze a natural language question to determine intent and create execution plan.
+
+        Args:
+            question: Natural language question from user
+            available_commands: List of available command functions
+            system_context: Current system state context
+
+        Returns:
+            Dict with intent analysis and execution plan
+        """
+        from datetime import datetime, UTC
+
+        current_date = datetime.now(UTC)
+
+        # Prepare context for LLM
+        context_info = ""
+        if system_context:
+            context_info = f"""
+System Context:
+- Projects: {len(system_context.get('projects', {}))} projects available
+- Tasks: {len(system_context.get('active_tasks', []))} active, {len(system_context.get('completed_tasks', []))} completed
+- Artifacts: {len(system_context.get('artifacts', {}))} artifacts available
+- Current focus: {system_context.get('current_focus_project', 'None')}
+"""
+
+        system_prompt = f"""You are an intelligent assistant that analyzes user questions and creates execution plans using available system commands.
+
+Current date: {current_date.strftime('%A, %B %d, %Y')}
+{context_info}
+
+Available commands you can use:
+{', '.join(available_commands)}
+
+Analyze the user's question and determine:
+1. What type of information they're seeking
+2. Which commands/functions would best answer their question
+3. What parameters those commands need
+4. Fallback strategies if primary approach fails
+
+Return JSON with this structure:
+{{
+    "intent": {{
+        "category": "artifacts|tasks|projects|status|summary|mixed",
+        "subcategory": "list|show|filter|analyze|count",
+        "entity": "project_name_or_null",
+        "scope": "today|this_week|all|specific_date",
+        "confidence": 0.9
+    }},
+    "execution_plan": [
+        {{
+            "command": "command_name",
+            "parameters": {{"param1": "value1"}},
+            "description": "what this step accomplishes",
+            "fallback": "alternative_command_if_this_fails"
+        }}
+    ],
+    "response_guidance": {{
+        "format": "list|summary|detailed|count",
+        "tone": "conversational|technical|brief",
+        "highlight": ["key", "points", "to", "emphasize"]
+    }},
+    "confidence": 0.9,
+    "reasoning": "explanation of analysis"
+}}
+
+Examples:
+- "Show me artifacts for NA Cube" → category: artifacts, command: get_project_artifacts, parameters: {{"project": "na cube"}}
+- "What tasks are due today?" → category: tasks, command: get_tasks_due_today
+- "How many completed tasks do I have?" → category: tasks, subcategory: count, command: count_completed_tasks"""
+
+        try:
+            response = await self.generate(
+                prompt=f"Analyze this question and create execution plan: '{question}'",
+                system_prompt=system_prompt,
+                temperature=0.1,
+                max_tokens=1000
+            )
+
+            # Parse JSON response
+            try:
+                content = response.content.strip()
+
+                # Remove markdown code block formatting if present
+                if content.startswith('```json'):
+                    content = content[7:]
+                if content.endswith('```'):
+                    content = content[:-3]
+                content = content.strip()
+
+                result = json.loads(content)
+                result["llm_response"] = response
+                return result
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from intent analysis: {response.content}")
+                return {
+                    "intent": {"category": "unknown", "confidence": 0.0},
+                    "execution_plan": [],
+                    "confidence": 0.0,
+                    "error": "Failed to parse LLM response",
+                    "raw_response": response.content
+                }
+
+        except Exception as e:
+            logger.error(f"Intent analysis failed: {e}")
+            return {
+                "intent": {"category": "unknown", "confidence": 0.0},
+                "execution_plan": [],
+                "confidence": 0.0,
+                "error": str(e)
+            }
+
+    async def synthesize_response(
+        self,
+        original_question: str,
+        execution_results: List[Dict[str, Any]],
+        intent_analysis: Dict[str, Any]
+    ) -> str:
+        """Synthesize a natural language response from execution results.
+
+        Args:
+            original_question: The user's original question
+            execution_results: Results from executing the planned commands
+            intent_analysis: The original intent analysis
+
+        Returns:
+            Natural language response string
+        """
+
+        # Prepare results summary for LLM
+        results_summary = []
+        for i, result in enumerate(execution_results):
+            command = result.get('command', 'unknown')
+            success = result.get('success', False)
+            data = result.get('data')
+            error = result.get('error')
+
+            if success and data:
+                if isinstance(data, list):
+                    results_summary.append(f"Command {i+1} ({command}): Found {len(data)} items")
+                elif isinstance(data, dict):
+                    results_summary.append(f"Command {i+1} ({command}): Retrieved data with {len(data)} fields")
+                else:
+                    results_summary.append(f"Command {i+1} ({command}): Retrieved: {str(data)[:100]}")
+            else:
+                results_summary.append(f"Command {i+1} ({command}): Failed - {error}")
+
+        response_guidance = intent_analysis.get('response_guidance', {})
+        format_type = response_guidance.get('format', 'conversational')
+        tone = response_guidance.get('tone', 'conversational')
+
+        system_prompt = f"""You are a helpful assistant that presents information in response to user questions.
+
+The user asked: "{original_question}"
+
+Command execution results:
+{chr(10).join(results_summary)}
+
+Raw execution data: {json.dumps(execution_results, indent=2, default=str)}
+
+Create a {tone} response in {format_type} format. Guidelines:
+- Answer the user's question directly and completely
+- Present information clearly and concisely
+- If no results were found, explain why and suggest alternatives
+- Use appropriate emojis sparingly (📎 for artifacts, ✅ for tasks, 📂 for projects)
+- Focus on the most relevant information first
+- If there were errors, mention them but don't make them the focus
+
+Response style: {tone}
+Format preference: {format_type}"""
+
+        try:
+            response = await self.generate(
+                prompt="Create a helpful response based on the execution results.",
+                system_prompt=system_prompt,
+                temperature=0.3,
+                max_tokens=800
+            )
+
+            return response.content.strip()
+
+        except Exception as e:
+            logger.error(f"Response synthesis failed: {e}")
+            # Fallback to basic response
+            if execution_results and any(r.get('success') for r in execution_results):
+                return "I found some information for your question, but had trouble formatting the response. Please try a more specific query."
+            else:
+                return "I wasn't able to find the information you requested. Please try rephrasing your question or being more specific."
+
     def get_status(self) -> Dict[str, Any]:
         """Get service status and statistics."""
         return {

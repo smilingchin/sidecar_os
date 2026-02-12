@@ -1359,6 +1359,27 @@ def ask(question: str = typer.Argument(..., help="Natural language question abou
     else:
         console.print("🧠 Processing your question with AI...", style="dim cyan")
 
+        # Try intelligent ask handler first - this is the new enhanced system
+        try:
+            from sidecar_os.core.sidecar_core.intelligent_ask import IntelligentAskHandler
+            from sidecar_os.core.sidecar_core.llm.service import LLMService
+
+            llm_service = LLMService()
+            intelligent_handler = IntelligentAskHandler(state, artifact_store, llm_service)
+
+            # Use async handler
+            def run_intelligent_ask():
+                import asyncio
+                return asyncio.run(intelligent_handler.handle_question(question))
+
+            response = run_intelligent_ask()
+            console.print(response)
+            return
+
+        except Exception as e:
+            console.print(f"⚠️ Intelligent ask failed ({str(e)}), falling back to legacy system...", style="yellow")
+            # Fall through to legacy system below
+
         # Check if this is an analytical/summary request
         analytical_keywords = ['summary', 'developments', 'progress', 'overview', 'what happened', 'status update', 'brief me', 'catch up']
         is_analytical_query = any(keyword in question_lower for keyword in analytical_keywords)
