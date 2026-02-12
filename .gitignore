@@ -32,6 +32,7 @@ ss
 # Design specification documents (keep local only)
 REQUIREMENTS.md
 CLAUDE.md
+FUTURE_ENHANCEMENTS.md
 
 # Session checkpoints and summaries (keep local only)
 claude-checkpoint/
