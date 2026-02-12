@@ -256,8 +256,11 @@ You can also try commands like:
         ]
         return [self._artifact_to_dict(artifact) for artifact in artifacts]
 
-    async def _search_artifacts_by_content(self, keywords: List[str], **kwargs) -> List[Dict[str, Any]]:
+    async def _search_artifacts_by_content(self, keywords: List[str] = None, **kwargs) -> List[Dict[str, Any]]:
         """Search artifacts by content keywords."""
+        if not keywords:
+            return []
+
         matching_artifacts = []
         keywords_lower = [k.lower() for k in keywords]
 
@@ -355,8 +358,11 @@ You can also try commands like:
         ]
         return [self._task_to_dict(task) for task in tasks_no_due]
 
-    async def _search_tasks_by_keywords(self, keywords: List[str], **kwargs) -> List[Dict[str, Any]]:
+    async def _search_tasks_by_keywords(self, keywords: List[str] = None, **kwargs) -> List[Dict[str, Any]]:
         """Search tasks by keywords in title/description."""
+        if not keywords:
+            return []
+
         matching_tasks = []
         keywords_lower = [k.lower() for k in keywords]
 
@@ -395,21 +401,34 @@ You can also try commands like:
         }
 
     def _find_project_id(self, project_name: str) -> Optional[str]:
-        """Find project ID by name or alias (case insensitive)."""
-        project_name_lower = project_name.lower()
+        """Find project ID by name or alias (case insensitive with fuzzy matching)."""
+        project_name_lower = project_name.lower().strip()
+
+        # Remove common suffixes that users might add
+        project_name_clean = project_name_lower
+        for suffix in [' project', ' proj', ' work']:
+            if project_name_clean.endswith(suffix):
+                project_name_clean = project_name_clean[:-len(suffix)].strip()
 
         for project in self.state.projects.values():
-            # Check exact name match
-            if project.name.lower() == project_name_lower:
+            project_name_db = project.name.lower()
+
+            # Check exact name match (original and cleaned)
+            if project_name_db == project_name_lower or project_name_db == project_name_clean:
                 return project.project_id
 
             # Check aliases
             for alias in project.aliases:
-                if alias.lower() == project_name_lower:
+                alias_lower = alias.lower()
+                if alias_lower == project_name_lower or alias_lower == project_name_clean:
                     return project.project_id
 
-            # Check if project name contains the search term
-            if project_name_lower in project.name.lower():
+            # Check if cleaned project name contains the search term
+            if project_name_clean in project_name_db:
+                return project.project_id
+
+            # Check if database project name contains the search term (reverse match)
+            if project_name_db in project_name_clean:
                 return project.project_id
 
         return None

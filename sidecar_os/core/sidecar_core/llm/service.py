@@ -1042,8 +1042,14 @@ Return JSON with this structure:
     "reasoning": "explanation of analysis"
 }}
 
+IMPORTANT: When extracting project names from questions:
+- Remove words like "project", "work", "tasks" from project names
+- Extract just the core project identifier
+- Use the exact case and format from the user's question
+
 Examples:
-- "Show me artifacts for NA Cube" → category: artifacts, command: get_project_artifacts, parameters: {{"project": "na cube"}}
+- "Show me artifacts for NA Cube project" → category: artifacts, command: get_project_artifacts, parameters: {{"project": "NA Cube"}}
+- "NA Cube project artifacts" → parameters: {{"project": "NA Cube"}}
 - "What tasks are due today?" → category: tasks, command: get_tasks_due_today
 - "How many completed tasks do I have?" → category: tasks, subcategory: count, command: count_completed_tasks"""
 
